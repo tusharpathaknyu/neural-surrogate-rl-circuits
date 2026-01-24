@@ -1,0 +1,92 @@
+{
+  "timestamp": "2026-01-24T11:47:23.256866",
+  "quick_mode": true,
+  "training_results": {
+    "buck": {
+      "topology": "buck",
+      "best_reward": -6959.262171625327,
+      "best_mse": 130.8023681640625,
+      "hidden_dim": 256,
+      "n_iterations": 60,
+      "total_steps": 61440
+    },
+    "boost": {
+      "topology": "boost",
+      "best_reward": -88289.07042882999,
+      "best_mse": 1689.8143310546875,
+      "hidden_dim": 512,
+      "n_iterations": 100,
+      "total_steps": 204800
+    },
+    "buck_boost": {
+      "topology": "buck_boost",
+      "best_reward": -29751.10625552654,
+      "best_mse": 579.7011108398438,
+      "hidden_dim": 256,
+      "n_iterations": 80,
+      "total_steps": 81920
+    },
+    "sepic": {
+      "topology": "sepic",
+      "best_reward": -24109.499370553844,
+      "best_mse": 468.1602783203125,
+      "hidden_dim": 512,
+      "n_iterations": 100,
+      "total_steps": 204800
+    },
+    "cuk": {
+      "topology": "cuk",
+      "best_reward": -25922.06370165653,
+      "best_mse": 503.72186279296875,
+      "hidden_dim": 256,
+      "n_iterations": 80,
+      "total_steps": 81920
+    },
+    "flyback": {
+      "topology": "flyback",
+      "best_reward": -32852.63823500649,
+      "best_mse": 639.6435546875,
+      "hidden_dim": 512,
+      "n_iterations": 100,
+      "total_steps": 204800
+    }
+  },
+  "test_results": {
+    "buck": {
+      "topology": "buck",
+      "mean_mse": 130.6916046142578,
+      "std_mse": 105.80564880371094,
+      "rmse": 11.432043075561523
+    },
+    "boost": {
+      "topology": "boost",
+      "mean_mse": 2320.11669921875,
+      "std_mse": 1199.717529296875,
+      "rmse": 48.1675910949707
+    },
+    "buck_boost": {
+      "topology": "buck_boost",
+      "mean_mse": 919.20947265625,
+      "std_mse": 1022.3339233398438,
+      "rmse": 30.31846809387207
+    },
+    "sepic": {
+      "topology": "sepic",
+      "mean_mse": 346.0083923339844,
+      "std_mse": 461.0857849121094,
+      "rmse": 18.601301193237305
+    },
+    "cuk": {
+      "topology": "cuk",
+      "mean_mse": 735.380126953125,
+      "std_mse": 850.5888671875,
+      "rmse": 27.11789321899414
+    },
+    "flyback": {
+      "topology": "flyback",
+      "mean_mse": 813.4575805664062,
+      "std_mse": 931.5886840820312,
+      "rmse": 28.521177291870117
+    }
+  }
+}

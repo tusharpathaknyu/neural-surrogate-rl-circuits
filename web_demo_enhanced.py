@@ -155,11 +155,22 @@ SURROGATE = None
 AGENT = None
 ENV = None
 DEVICE = None
+PER_TOPOLOGY_AGENTS = {}  # Cache for per-topology agents
+
+# Per-topology agent configurations (must match training)
+TOPOLOGY_AGENT_CONFIG = {
+    'buck': {'hidden_dim': 256},
+    'boost': {'hidden_dim': 512},
+    'buck_boost': {'hidden_dim': 256},
+    'sepic': {'hidden_dim': 512},
+    'cuk': {'hidden_dim': 256},
+    'flyback': {'hidden_dim': 512},
+}
 
 
 def load_models():
     """Load trained models."""
-    global SURROGATE, AGENT, ENV, DEVICE
+    global SURROGATE, AGENT, ENV, DEVICE, PER_TOPOLOGY_AGENTS
     
     DEVICE = 'mps' if torch.backends.mps.is_available() else 'cpu'
     
@@ -181,24 +192,57 @@ def load_models():
     SURROGATE.to(DEVICE)
     SURROGATE.eval()
     
-    # Load RL agent - prefer multi-topology agent if available
+    # Create base environment
     ENV = CircuitDesignEnv(SURROGATE, device=DEVICE)
     
-    # Try multi-topology agent first (uses hidden_dim=512)
-    multi_agent_path = Path('checkpoints/multi_topo_rl_agent.pt')
-    if multi_agent_path.exists():
-        AGENT = PPOAgent(ENV, hidden_dim=512, device=DEVICE)  # Extended training uses 512
-        AGENT.load(str(multi_agent_path))
-        print("✓ Loaded multi-topology RL agent (hidden=512)")
-    else:
-        # Fallback to single-topology agent (uses default hidden_dim=256)
-        AGENT = PPOAgent(ENV, device=DEVICE)
-        agent_path = Path('checkpoints/rl_agent.pt')
+    # Load per-topology agents if available
+    for topo_name, config in TOPOLOGY_AGENT_CONFIG.items():
+        agent_path = Path(f'checkpoints/rl_agent_{topo_name}.pt')
         if agent_path.exists():
-            AGENT.load(str(agent_path))
-            print("✓ Loaded legacy RL agent")
+            agent = PPOAgent(ENV, hidden_dim=config['hidden_dim'], device=DEVICE)
+            agent.load(str(agent_path))
+            PER_TOPOLOGY_AGENTS[topo_name] = agent
+            print(f"  ✓ Loaded {topo_name} agent (hidden={config['hidden_dim']})")
+    
+    if PER_TOPOLOGY_AGENTS:
+        print(f"✓ Loaded {len(PER_TOPOLOGY_AGENTS)} per-topology RL agents")
+        AGENT = list(PER_TOPOLOGY_AGENTS.values())[0]  # Default to first
+    else:
+        # Fallback to multi-topology agent
+        multi_agent_path = Path('checkpoints/multi_topo_rl_agent.pt')
+        if multi_agent_path.exists():
+            AGENT = PPOAgent(ENV, hidden_dim=512, device=DEVICE)
+            AGENT.load(str(multi_agent_path))
+            print("✓ Loaded multi-topology RL agent (fallback)")
+        else:
+            AGENT = PPOAgent(ENV, device=DEVICE)
+            agent_path = Path('checkpoints/rl_agent.pt')
+            if agent_path.exists():
+                AGENT.load(str(agent_path))
+                print("✓ Loaded legacy RL agent")
     
     return True
+
+
+def get_agent_for_topology(topology_name: str):
+    """Get the best agent for a given topology."""
+    # Map display names to internal names
+    topo_map = {
+        "Buck (Step-Down)": "buck",
+        "Boost (Step-Up)": "boost",
+        "Buck-Boost (Inverting)": "buck_boost",
+        "SEPIC (Non-Inverting)": "sepic",
+        "Ćuk (Continuous Current)": "cuk",
+        "Flyback (Isolated)": "flyback",
+    }
+    topo_key = topo_map.get(topology_name, "buck")
+    
+    # Return per-topology agent if available
+    if topo_key in PER_TOPOLOGY_AGENTS:
+        return PER_TOPOLOGY_AGENTS[topo_key]
+    
+    # Fallback to global agent
+    return AGENT
 
 
 # ============================================================================
@@ -373,10 +417,13 @@ def design_circuit(topology: str, v_in: float, v_out: float,
                    i_out: float, ripple_target: float,
                    f_sw: float, optimization_steps: int) -> tuple:
     """Full circuit design workflow."""
-    global AGENT, ENV
+    global ENV
     
-    if AGENT is None:
+    if SURROGATE is None:
         load_models()
+    
+    # Get the appropriate agent for this topology
+    agent = get_agent_for_topology(topology)
     
     # Validate voltage conversion is possible
     topo_info = TOPOLOGIES[topology]
@@ -439,7 +486,7 @@ def design_circuit(topology: str, v_in: float, v_out: float,
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
         
         with torch.no_grad():
-            action, _, _ = AGENT.policy.get_action(state_tensor, deterministic=True)
+            action, _, _ = agent.policy.get_action(state_tensor, deterministic=True)
         
         action_np = action.cpu().numpy().squeeze()
         state, _, done, info = ENV.step(action_np)
