@@ -1,0 +1,209 @@
+{
+  "num_samples_per_topology": 5000,
+  "total_samples": 30000,
+  "waveform_points": 512,
+  "topologies": {
+    "BUCK": {
+      "id": 0,
+      "description": "Steps voltage down. Vout = Vin \u00d7 D. Best for: 12V\u21925V, 24V\u219212V"
+    },
+    "BOOST": {
+      "id": 1,
+      "description": "Steps voltage up. Vout = Vin / (1-D). Best for: 5V\u219212V, battery boost"
+    },
+    "BUCK_BOOST": {
+      "id": 2,
+      "description": "Can step up/down, inverted output. Vout = -Vin \u00d7 D/(1-D)"
+    },
+    "SEPIC": {
+      "id": 3,
+      "description": "Like buck-boost but non-inverting. Vout = Vin \u00d7 D/(1-D)"
+    },
+    "CUK": {
+      "id": 4,
+      "description": "Continuous input/output current. Vout = -Vin \u00d7 D/(1-D)"
+    },
+    "FLYBACK": {
+      "id": 5,
+      "description": "Galvanic isolation, flexible ratios. Vout = Vin \u00d7 N \u00d7 D/(1-D)"
+    }
+  },
+  "param_ranges": {
+    "BUCK": {
+      "L": [
+        1e-05,
+        0.0001
+      ],
+      "C": [
+        4.7e-05,
+        0.00047
+      ],
+      "R_load": [
+        2,
+        50
+      ],
+      "V_in": [
+        8,
+        48
+      ],
+      "f_sw": [
+        50000.0,
+        500000.0
+      ],
+      "duty": [
+        0.1,
+        0.9
+      ]
+    },
+    "BOOST": {
+      "L": [
+        2.2e-05,
+        0.00022
+      ],
+      "C": [
+        0.0001,
+        0.001
+      ],
+      "R_load": [
+        10,
+        100
+      ],
+      "V_in": [
+        3.3,
+        24
+      ],
+      "f_sw": [
+        50000.0,
+        300000.0
+      ],
+      "duty": [
+        0.2,
+        0.8
+      ]
+    },
+    "BUCK_BOOST": {
+      "L": [
+        4.7e-05,
+        0.00047
+      ],
+      "C": [
+        0.0001,
+        0.001
+      ],
+      "R_load": [
+        5,
+        50
+      ],
+      "V_in": [
+        5,
+        36
+      ],
+      "f_sw": [
+        50000.0,
+        200000.0
+      ],
+      "duty": [
+        0.2,
+        0.8
+      ]
+    },
+    "SEPIC": {
+      "L1": [
+        2.2e-05,
+        0.00022
+      ],
+      "L2": [
+        2.2e-05,
+        0.00022
+      ],
+      "C_couple": [
+        1e-06,
+        1e-05
+      ],
+      "C_out": [
+        0.0001,
+        0.001
+      ],
+      "R_load": [
+        10,
+        100
+      ],
+      "V_in": [
+        5,
+        24
+      ],
+      "f_sw": [
+        50000.0,
+        200000.0
+      ],
+      "duty": [
+        0.2,
+        0.8
+      ]
+    },
+    "CUK": {
+      "L1": [
+        4.7e-05,
+        0.00047
+      ],
+      "L2": [
+        4.7e-05,
+        0.00047
+      ],
+      "C_couple": [
+        1e-06,
+        2.2e-05
+      ],
+      "C_out": [
+        0.0001,
+        0.001
+      ],
+      "R_load": [
+        5,
+        50
+      ],
+      "V_in": [
+        5,
+        24
+      ],
+      "f_sw": [
+        50000.0,
+        200000.0
+      ],
+      "duty": [
+        0.2,
+        0.8
+      ]
+    },
+    "FLYBACK": {
+      "L_pri": [
+        0.0001,
+        0.001
+      ],
+      "n_ratio": [
+        0.1,
+        2.0
+      ],
+      "C": [
+        0.0001,
+        0.001
+      ],
+      "R_load": [
+        5,
+        100
+      ],
+      "V_in": [
+        12,
+        400
+      ],
+      "f_sw": [
+        50000.0,
+        150000.0
+      ],
+      "duty": [
+        0.2,
+        0.5
+      ]
+    }
+  }
+}
