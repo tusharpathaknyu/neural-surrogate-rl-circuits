@@ -124,14 +124,14 @@ class MultiTopologyEnv(CircuitDesignEnv):
 
 
 def train_multi_topology_agent(
-    n_iterations: int = 200,
-    steps_per_iter: int = 2048,
-    save_every: int = 50,
+    n_iterations: int = 500,
+    steps_per_iter: int = 4096,
+    save_every: int = 100,
 ):
-    """Train PPO agent on multi-topology surrogate."""
+    """Train PPO agent on multi-topology surrogate with improved hyperparameters."""
     
     print("\n" + "="*60)
-    print("Training Multi-Topology RL Agent")
+    print("Training Multi-Topology RL Agent (Extended)")
     print("="*60)
     
     # Load multi-topology surrogate
@@ -143,19 +143,19 @@ def train_multi_topology_agent(
     env = MultiTopologyEnv(surrogate, device=DEVICE)
     print(f"  ✓ Created environment with {len(TOPOLOGIES)} topologies")
     
-    # Create agent
+    # Create agent with improved hyperparameters
     agent = PPOAgent(
         env,
-        hidden_dim=256,
-        lr=3e-4,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_epsilon=0.2,
-        entropy_coef=0.01,
+        hidden_dim=512,          # Larger network
+        lr=1e-4,                 # Lower learning rate for stability
+        gamma=0.995,             # Longer horizon
+        gae_lambda=0.97,         # Better advantage estimation
+        clip_epsilon=0.15,       # Tighter clipping
+        entropy_coef=0.005,      # Less exploration as training progresses
         value_coef=0.5,
         device=DEVICE,
     )
-    print(f"  ✓ Created PPO agent")
+    print(f"  ✓ Created PPO agent (hidden=512, lr=1e-4)")
     
     # Training tracking
     all_rewards = []
@@ -294,8 +294,8 @@ if __name__ == '__main__':
     import argparse
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--iterations', type=int, default=200)
-    parser.add_argument('--steps', type=int, default=2048)
+    parser.add_argument('--iterations', type=int, default=500)
+    parser.add_argument('--steps', type=int, default=4096)
     parser.add_argument('--test-only', action='store_true')
     args = parser.parse_args()
     

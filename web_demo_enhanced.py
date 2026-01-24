@@ -183,15 +183,16 @@ def load_models():
     
     # Load RL agent - prefer multi-topology agent if available
     ENV = CircuitDesignEnv(SURROGATE, device=DEVICE)
-    AGENT = PPOAgent(ENV, device=DEVICE)
     
-    # Try multi-topology agent first
+    # Try multi-topology agent first (uses hidden_dim=512)
     multi_agent_path = Path('checkpoints/multi_topo_rl_agent.pt')
     if multi_agent_path.exists():
+        AGENT = PPOAgent(ENV, hidden_dim=512, device=DEVICE)  # Extended training uses 512
         AGENT.load(str(multi_agent_path))
-        print("✓ Loaded multi-topology RL agent")
+        print("✓ Loaded multi-topology RL agent (hidden=512)")
     else:
-        # Fallback to single-topology agent
+        # Fallback to single-topology agent (uses default hidden_dim=256)
+        AGENT = PPOAgent(ENV, device=DEVICE)
         agent_path = Path('checkpoints/rl_agent.pt')
         if agent_path.exists():
             AGENT.load(str(agent_path))
@@ -473,32 +474,77 @@ def design_circuit(topology: str, v_in: float, v_out: float,
 def create_comprehensive_visualization(target, predicted, params, history,
                                        topology, v_in, v_out, eff_info, 
                                        cost_info, warning):
-    """Create comprehensive visualization."""
-    fig = plt.figure(figsize=(14, 10))
+    """Create comprehensive visualization with prominent waveform display."""
+    fig = plt.figure(figsize=(16, 12))
     
-    # Layout: 2x3 grid
-    gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
+    # Layout: 3x3 grid - top row spans full width for waveform
+    gs = fig.add_gridspec(3, 3, hspace=0.35, wspace=0.3, height_ratios=[1.5, 1, 1])
     
     t = np.linspace(0, 1, 512)
     
-    # 1. Waveform comparison (large, top-left)
-    ax1 = fig.add_subplot(gs[0, :2])
-    ax1.plot(t * 1000, target, 'b-', label='Target', linewidth=2, alpha=0.7)
-    ax1.plot(t * 1000, predicted, 'r--', label='RL Design', linewidth=2)
-    ax1.set_xlabel('Time (ms)')
-    ax1.set_ylabel('Voltage (V)')
-    ax1.set_title(f'Output Waveform: {topology}', fontsize=12, fontweight='bold')
-    ax1.legend(loc='lower right')
+    # ================================================================
+    # 1. MAIN WAVEFORM DISPLAY (Full top row - most prominent)
+    # ================================================================
+    ax1 = fig.add_subplot(gs[0, :])
+    
+    # Plot target waveform
+    ax1.plot(t * 1000, target, 'b-', label=f'Target (Vout={v_out}V)', linewidth=2.5, alpha=0.8)
+    
+    # Plot predicted/designed waveform
+    ax1.plot(t * 1000, predicted, 'r--', label='RL Designed Output', linewidth=2.5)
+    
+    # Calculate and display metrics
+    dc_target = np.mean(target[len(target)//2:])  # DC component of target
+    dc_predicted = np.mean(predicted[len(predicted)//2:])  # DC component of predicted
+    ripple_predicted = np.std(predicted[len(predicted)//2:])  # Ripple of predicted
+    mse = np.mean((target - predicted) ** 2)
+    
+    # Fill between to show error
+    ax1.fill_between(t * 1000, target, predicted, alpha=0.2, color='orange', label='Error Region')
+    
+    # Add DC lines
+    ax1.axhline(dc_target, color='blue', linestyle=':', alpha=0.5, linewidth=1.5)
+    ax1.axhline(dc_predicted, color='red', linestyle=':', alpha=0.5, linewidth=1.5)
+    
+    ax1.set_xlabel('Time (ms)', fontsize=12)
+    ax1.set_ylabel('Voltage (V)', fontsize=12)
+    ax1.set_title(f'⚡ OUTPUT WAVEFORM COMPARISON: {topology}', fontsize=14, fontweight='bold')
+    ax1.legend(loc='lower right', fontsize=10)
     ax1.grid(True, alpha=0.3)
-    ax1.axhline(v_out, color='g', linestyle=':', alpha=0.5, label=f'Target DC: {v_out}V')
     
-    # Add Vin annotation
-    ax1.annotate(f'Vin = {v_in}V', xy=(0.02, 0.98), xycoords='axes fraction',
-                 fontsize=10, verticalalignment='top',
-                 bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7))
+    # Add performance metrics box
+    metrics_text = f'DC Error: {abs(dc_target - dc_predicted):.2f}V ({abs(dc_target - dc_predicted)/dc_target*100:.1f}%)\n'
+    metrics_text += f'Ripple: {ripple_predicted:.2f}V ({ripple_predicted/dc_predicted*100:.1f}%)\n'
+    metrics_text += f'MSE: {mse:.4f}'
+    ax1.annotate(metrics_text, xy=(0.98, 0.98), xycoords='axes fraction',
+                 fontsize=11, verticalalignment='top', horizontalalignment='right',
+                 bbox=dict(boxstyle='round', facecolor='white', edgecolor='gray', alpha=0.9))
     
-    # 2. Efficiency pie chart (top-right)
-    ax2 = fig.add_subplot(gs[0, 2])
+    # Add Vin/Vout annotation
+    io_text = f'Vin = {v_in}V → Vout = {v_out}V\nDuty = {params[5]*100:.1f}%'
+    ax1.annotate(io_text, xy=(0.02, 0.98), xycoords='axes fraction',
+                 fontsize=11, verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.8))
+    
+    # ================================================================
+    # 2. ZOOMED STEADY-STATE WAVEFORM (middle-left)
+    # ================================================================
+    ax_zoom = fig.add_subplot(gs[1, 0])
+    # Zoom into last 20% of waveform (steady state)
+    zoom_start = int(0.7 * len(t))
+    t_zoom = t[zoom_start:] * 1000
+    ax_zoom.plot(t_zoom, target[zoom_start:], 'b-', label='Target', linewidth=2)
+    ax_zoom.plot(t_zoom, predicted[zoom_start:], 'r--', label='Designed', linewidth=2)
+    ax_zoom.set_xlabel('Time (ms)', fontsize=10)
+    ax_zoom.set_ylabel('Voltage (V)', fontsize=10)
+    ax_zoom.set_title('🔍 Steady-State Zoom', fontsize=11, fontweight='bold')
+    ax_zoom.legend(fontsize=8)
+    ax_zoom.grid(True, alpha=0.3)
+    
+    # ================================================================
+    # 3. EFFICIENCY PIE CHART (middle-center)
+    # ================================================================
+    ax2 = fig.add_subplot(gs[1, 1])
     losses = [eff_info['switching_loss'], eff_info['conduction_loss'], eff_info['other_loss']]
     labels = ['Switching', 'Conduction', 'Other']
     colors = ['#ff6b6b', '#ffa06b', '#ffdb6b']
@@ -507,36 +553,55 @@ def create_comprehensive_visualization(target, predicted, params, history,
         losses, labels=labels, autopct='%1.1f%%', colors=colors,
         explode=(0.05, 0.05, 0.05), startangle=90
     )
-    ax2.set_title(f'Loss Breakdown\n(η = {eff_info["efficiency"]:.1f}%)', fontweight='bold')
+    ax2.set_title(f'⚡ Loss Breakdown\n(η = {eff_info["efficiency"]:.1f}%)', fontweight='bold')
     
-    # 3. Optimization progress (bottom-left)
-    ax3 = fig.add_subplot(gs[1, 0])
+    # ================================================================
+    # 4. OPTIMIZATION PROGRESS (middle-right)
+    # ================================================================
+    ax3 = fig.add_subplot(gs[1, 2])
     ax3.semilogy(history, 'b-o', markersize=3)
     ax3.set_xlabel('Optimization Step')
     ax3.set_ylabel('MSE (log)')
-    ax3.set_title('RL Optimization Progress', fontweight='bold')
+    ax3.set_title('📈 RL Optimization Progress', fontweight='bold')
     ax3.grid(True, alpha=0.3)
     ax3.axhline(history[-1], color='r', linestyle='--', alpha=0.5)
     ax3.annotate(f'Final: {history[-1]:.4f}', xy=(len(history)-1, history[-1]),
                  xytext=(5, 10), textcoords='offset points', fontsize=9)
     
-    # 4. Cost breakdown (bottom-middle)
-    ax4 = fig.add_subplot(gs[1, 1])
+    # ================================================================
+    # 5. COST BREAKDOWN (bottom-left)
+    # ================================================================
+    ax4 = fig.add_subplot(gs[2, 0])
     cost_items = [(k, v) for k, v in cost_info.items() if k != 'total']
     names = [item[0].title() for item in cost_items]
     values = [item[1] for item in cost_items]
     
     bars = ax4.bar(names, values, color=['#4CAF50', '#2196F3', '#FF9800', '#E91E63', '#9C27B0'][:len(names)])
     ax4.set_ylabel('Cost ($)')
-    ax4.set_title(f'Component Costs (Total: ${cost_info["total"]:.2f})', fontweight='bold')
+    ax4.set_title(f'💰 Component Costs (Total: ${cost_info["total"]:.2f})', fontweight='bold')
     ax4.tick_params(axis='x', rotation=45)
     
     for bar, val in zip(bars, values):
         ax4.annotate(f'${val:.2f}', xy=(bar.get_x() + bar.get_width()/2, bar.get_height()),
                      xytext=(0, 3), textcoords='offset points', ha='center', fontsize=8)
     
-    # 5. Component values (bottom-right)
-    ax5 = fig.add_subplot(gs[1, 2])
+    # ================================================================
+    # 6. WAVEFORM ERROR PLOT (bottom-center)
+    # ================================================================
+    ax_diff = fig.add_subplot(gs[2, 1])
+    error_waveform = predicted - target
+    ax_diff.plot(t * 1000, error_waveform, 'orange', linewidth=1.5)
+    ax_diff.fill_between(t * 1000, error_waveform, 0, alpha=0.3, color='orange')
+    ax_diff.axhline(0, color='black', linestyle='-', linewidth=0.5)
+    ax_diff.set_xlabel('Time (ms)', fontsize=10)
+    ax_diff.set_ylabel('Error (V)', fontsize=10)
+    ax_diff.set_title('📉 Waveform Error (Design - Target)', fontweight='bold')
+    ax_diff.grid(True, alpha=0.3)
+    
+    # ================================================================
+    # 7. COMPONENT VALUES (bottom-right)
+    # ================================================================
+    ax5 = fig.add_subplot(gs[2, 2])
     ax5.axis('off')
     
     text = f"""
