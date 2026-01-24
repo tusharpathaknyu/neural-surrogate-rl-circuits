@@ -35,6 +35,16 @@ from models.multi_topology_surrogate import MultiTopologySurrogate
 from rl.environment import CircuitDesignEnv
 from rl.ppo_agent import PPOAgent
 
+# Import new features
+try:
+    from utils.uncertainty import UncertaintyEstimator, RobustnessAnalyzer
+    from utils.spice_validator import SPICEValidator
+    from rl.pareto_optimizer import ParetoOptimizer
+    ADVANCED_FEATURES = True
+except ImportError:
+    ADVANCED_FEATURES = False
+    print("⚠️ Advanced features not available")
+
 
 # ============================================================================
 # TOPOLOGY DEFINITIONS
@@ -171,12 +181,21 @@ def load_models():
     SURROGATE.to(DEVICE)
     SURROGATE.eval()
     
-    # Load RL agent
+    # Load RL agent - prefer multi-topology agent if available
     ENV = CircuitDesignEnv(SURROGATE, device=DEVICE)
     AGENT = PPOAgent(ENV, device=DEVICE)
-    agent_path = Path('checkpoints/rl_agent.pt')
-    if agent_path.exists():
-        AGENT.load(str(agent_path))
+    
+    # Try multi-topology agent first
+    multi_agent_path = Path('checkpoints/multi_topo_rl_agent.pt')
+    if multi_agent_path.exists():
+        AGENT.load(str(multi_agent_path))
+        print("✓ Loaded multi-topology RL agent")
+    else:
+        # Fallback to single-topology agent
+        agent_path = Path('checkpoints/rl_agent.pt')
+        if agent_path.exists():
+            AGENT.load(str(agent_path))
+            print("✓ Loaded legacy RL agent")
     
     return True
 
@@ -640,6 +659,293 @@ def format_comprehensive_results(topology, topo_info, components, params, mse,
 # GRADIO INTERFACE
 # ============================================================================
 
+# Global advanced feature instances
+UNCERTAINTY_ESTIMATOR = None
+ROBUSTNESS_ANALYZER = None
+SPICE_VALIDATOR = None
+PARETO_OPTIMIZER = None
+
+def init_advanced_features():
+    """Initialize advanced analysis features."""
+    global UNCERTAINTY_ESTIMATOR, ROBUSTNESS_ANALYZER, SPICE_VALIDATOR, PARETO_OPTIMIZER
+    
+    if ADVANCED_FEATURES and SURROGATE is not None:
+        UNCERTAINTY_ESTIMATOR = UncertaintyEstimator(SURROGATE, n_samples=20, device=DEVICE)
+        ROBUSTNESS_ANALYZER = RobustnessAnalyzer(SURROGATE, device=DEVICE)
+        SPICE_VALIDATOR = SPICEValidator()
+        PARETO_OPTIMIZER = ParetoOptimizer(SURROGATE, device=DEVICE)
+        return True
+    return False
+
+
+def run_advanced_analysis(topology: str, v_in: float, v_out: float, 
+                          i_out: float, f_sw: float) -> tuple:
+    """Run advanced analysis: uncertainty, robustness, SPICE validation."""
+    if not ADVANCED_FEATURES:
+        return None, "⚠️ Advanced features not available"
+    
+    if UNCERTAINTY_ESTIMATOR is None:
+        init_advanced_features()
+    
+    # Map topology name
+    topo_name_map = {
+        "Buck (Step-Down)": "buck",
+        "Boost (Step-Up)": "boost",
+        "Buck-Boost (Inverting)": "buck_boost",
+        "SEPIC (Non-Inverting)": "sepic",
+        "Ćuk (Continuous Current)": "cuk",
+        "Flyback (Isolated)": "flyback",
+    }
+    topo = topo_name_map.get(topology, "buck")
+    
+    # Calculate duty cycle
+    duty = calculate_duty_cycle(topology, v_in, v_out)
+    
+    # Create parameter tensor
+    params = torch.tensor([[
+        50e-6,   # L
+        220e-6,  # C
+        v_out / i_out,  # R_load
+        v_in,
+        f_sw * 1e3,
+        duty,
+    ]], dtype=torch.float32)
+    
+    topology_ids = torch.tensor([topo_name_map.get(topology, 0) if isinstance(topo_name_map.get(topology, 0), int) 
+                                  else list(topo_name_map.values()).index(topo)])
+    topology_ids = torch.tensor([{'buck': 0, 'boost': 1, 'buck_boost': 2, 'sepic': 3, 'cuk': 4, 'flyback': 5}[topo]])
+    
+    # 1. Uncertainty Analysis
+    uncertainty_result = UNCERTAINTY_ESTIMATOR.predict_with_uncertainty(params, topology_ids)
+    
+    # 2. Robustness Analysis
+    robustness_result = ROBUSTNESS_ANALYZER.monte_carlo_robustness(params, topology_ids, n_samples=50)
+    
+    # 3. SPICE Validation (if available)
+    spice_result = None
+    if SPICE_VALIDATOR.ngspice_available:
+        spice_result = SPICE_VALIDATOR.validate_surrogate(SURROGATE, params.numpy().squeeze(), topo)
+    
+    # Create visualization
+    fig = plt.figure(figsize=(14, 8))
+    gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
+    
+    # 1. Prediction with confidence interval
+    ax1 = fig.add_subplot(gs[0, 0:2])
+    t = np.linspace(0, 1, 512)
+    mean_wave = uncertainty_result['waveform_mean'].squeeze()
+    ci_low = uncertainty_result['waveform_ci_low'].squeeze()
+    ci_high = uncertainty_result['waveform_ci_high'].squeeze()
+    
+    ax1.fill_between(t, ci_low, ci_high, alpha=0.3, color='blue', label='95% CI')
+    ax1.plot(t, mean_wave, 'b-', linewidth=2, label='Prediction')
+    if spice_result and spice_result['valid']:
+        ax1.plot(t, spice_result['spice_waveform'], 'r--', linewidth=2, label='SPICE')
+    ax1.set_xlabel('Time (normalized)')
+    ax1.set_ylabel('Voltage (V)')
+    ax1.set_title(f'Prediction Confidence (±{uncertainty_result["waveform_std"].mean():.2f}V)')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. Confidence gauge
+    ax2 = fig.add_subplot(gs[0, 2])
+    conf = uncertainty_result['confidence_pct'][0]
+    colors = ['red', 'orange', 'yellow', 'lightgreen', 'green']
+    color = colors[min(4, int(conf / 20))]
+    ax2.barh([0], [conf], color=color, height=0.5)
+    ax2.set_xlim(0, 100)
+    ax2.set_yticks([])
+    ax2.set_xlabel('Confidence (%)')
+    ax2.set_title(f'Model Confidence: {conf:.0f}%')
+    ax2.axvline(x=80, color='green', linestyle='--', alpha=0.5)
+    
+    # 3. Robustness histogram
+    ax3 = fig.add_subplot(gs[1, 0])
+    v_out_range = robustness_result['v_out_range'][0]
+    rob_score = robustness_result['robustness_score'][0]
+    ax3.bar(['Vout Range', 'Robustness'], [v_out_range, rob_score/10], color=['orange', 'green'])
+    ax3.set_ylabel('Value')
+    ax3.set_title(f'Robustness Score: {rob_score:.0f}%')
+    
+    # 4. Tolerance effects
+    ax4 = fig.add_subplot(gs[1, 1])
+    tolerances = list(robustness_result['tolerances'].keys())
+    tol_values = [robustness_result['tolerances'][t] * 100 for t in tolerances]
+    ax4.barh(tolerances, tol_values, color='steelblue')
+    ax4.set_xlabel('Tolerance (%)')
+    ax4.set_title('Component Tolerances')
+    
+    # 5. Metrics summary
+    ax5 = fig.add_subplot(gs[1, 2])
+    ax5.axis('off')
+    
+    summary_text = f"""
+    📊 ANALYSIS SUMMARY
+    ━━━━━━━━━━━━━━━━━━━
+    
+    🎯 Prediction
+       Vout: {mean_wave.mean():.2f}V
+       Uncertainty: ±{uncertainty_result['waveform_std'].mean():.3f}V
+       Confidence: {conf:.0f}%
+    
+    🔧 Robustness
+       Vout Range: {robustness_result['v_out_mean'][0]:.2f} ± {robustness_result['v_out_std'][0]:.2f}V
+       Worst Ripple: {robustness_result['ripple_worst'][0]:.3f}V
+       Score: {rob_score:.0f}%
+    """
+    
+    if spice_result and spice_result['valid']:
+        summary_text += f"""
+    ✓ SPICE Validation
+       Correlation: {spice_result['correlation']:.3f}
+       DC Error: {spice_result['dc_error_pct']:.1f}%
+       Speedup: {spice_result['speedup']:.0f}x
+        """
+    
+    ax5.text(0.1, 0.9, summary_text, transform=ax5.transAxes, 
+             fontsize=10, verticalalignment='top', fontfamily='monospace',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    plt.tight_layout()
+    
+    # Create markdown report
+    report = f"""
+## 🔬 Advanced Analysis Results
+
+### 🎯 Prediction Confidence
+- **Model Confidence**: {conf:.0f}%
+- **Prediction Uncertainty**: ±{uncertainty_result['waveform_std'].mean():.3f}V
+- **Relative Uncertainty**: {uncertainty_result['relative_uncertainty'][0]*100:.2f}%
+
+### 🔧 Robustness to Component Tolerances
+- **Output Voltage Range**: {robustness_result['v_out_mean'][0]:.2f}V ± {robustness_result['v_out_std'][0]:.2f}V
+- **Worst-Case Ripple**: {robustness_result['ripple_worst'][0]:.3f}V
+- **Robustness Score**: {rob_score:.0f}%
+
+### ⚠️ Tolerance Assumptions
+| Component | Tolerance |
+|-----------|-----------|
+| Inductor (L) | ±10% |
+| Capacitor (C) | ±20% |
+| Load (R) | ±5% |
+| Input Voltage | ±5% |
+"""
+    
+    if spice_result and spice_result['valid']:
+        report += f"""
+### ✓ SPICE Validation
+- **Correlation**: {spice_result['correlation']:.4f}
+- **DC Error**: {spice_result['dc_error_pct']:.2f}%
+- **SPICE Time**: {spice_result['spice_time_ms']:.1f}ms
+- **Surrogate Time**: {spice_result['surrogate_time_ms']:.3f}ms
+- **Speedup**: {spice_result['speedup']:.0f}x
+"""
+    
+    return fig, report
+
+
+def run_pareto_optimization(topology: str, v_out_target: float) -> tuple:
+    """Run Pareto multi-objective optimization."""
+    if not ADVANCED_FEATURES:
+        return None, "⚠️ Advanced features not available"
+    
+    if PARETO_OPTIMIZER is None:
+        init_advanced_features()
+    
+    # Map topology name
+    topo_name_map = {
+        "Buck (Step-Down)": "buck",
+        "Boost (Step-Up)": "boost", 
+        "Buck-Boost (Inverting)": "buck_boost",
+        "SEPIC (Non-Inverting)": "sepic",
+        "Ćuk (Continuous Current)": "cuk",
+        "Flyback (Isolated)": "flyback",
+    }
+    topo = topo_name_map.get(topology, "buck")
+    
+    # Run optimization
+    pareto_front = PARETO_OPTIMIZER.optimize(
+        topology=topo,
+        v_target=v_out_target,
+        population_size=40,
+        n_generations=20,
+        verbose=False
+    )
+    
+    # Create visualization
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    
+    # 1. Efficiency vs Accuracy
+    errors = [d.v_out_error * 100 for d in pareto_front]
+    effs = [d.efficiency * 100 for d in pareto_front]
+    costs = [d.cost for d in pareto_front]
+    
+    axes[0].scatter(errors, effs, c=costs, cmap='viridis', s=50, alpha=0.7)
+    axes[0].set_xlabel('Voltage Error (%)')
+    axes[0].set_ylabel('Efficiency (%)')
+    axes[0].set_title('Pareto Front: Accuracy vs Efficiency')
+    axes[0].grid(True, alpha=0.3)
+    plt.colorbar(axes[0].collections[0], ax=axes[0], label='Cost ($)')
+    
+    # 2. Cost vs Efficiency
+    axes[1].scatter(costs, effs, c=errors, cmap='RdYlGn_r', s=50, alpha=0.7)
+    axes[1].set_xlabel('Cost ($)')
+    axes[1].set_ylabel('Efficiency (%)')
+    axes[1].set_title('Pareto Front: Cost vs Efficiency')
+    axes[1].grid(True, alpha=0.3)
+    plt.colorbar(axes[1].collections[0], ax=axes[1], label='Error (%)')
+    
+    # 3. Recommendations table
+    axes[2].axis('off')
+    
+    recommendations = []
+    for priority in ['balanced', 'efficiency', 'cost', 'accuracy']:
+        design = PARETO_OPTIMIZER.recommend_design(pareto_front, priority)
+        recommendations.append({
+            'priority': priority.capitalize(),
+            'L': f"{design.params[0]*1e6:.1f}µH",
+            'C': f"{design.params[1]*1e6:.0f}µF",
+            'eff': f"{design.efficiency*100:.1f}%",
+            'cost': f"${design.cost:.2f}",
+        })
+    
+    table_text = "RECOMMENDATIONS\n" + "="*50 + "\n"
+    table_text += f"{'Priority':<12} {'L':<10} {'C':<10} {'Eff':<8} {'Cost':<8}\n"
+    table_text += "-"*50 + "\n"
+    for r in recommendations:
+        table_text += f"{r['priority']:<12} {r['L']:<10} {r['C']:<10} {r['eff']:<8} {r['cost']:<8}\n"
+    
+    axes[2].text(0.1, 0.9, table_text, transform=axes[2].transAxes,
+                 fontsize=10, verticalalignment='top', fontfamily='monospace',
+                 bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+    
+    plt.tight_layout()
+    
+    # Create report
+    report = f"""
+## 🎯 Pareto Multi-Objective Optimization
+
+Found **{len(pareto_front)} Pareto-optimal designs** for {topology} → {v_out_target}V
+
+### 📊 Design Recommendations
+
+| Priority | Inductor | Capacitor | Efficiency | Cost |
+|----------|----------|-----------|------------|------|
+"""
+    for r in recommendations:
+        report += f"| {r['priority']} | {r['L']} | {r['C']} | {r['eff']} | {r['cost']} |\n"
+    
+    report += """
+### 💡 How to Choose
+- **Balanced**: Best overall trade-off (default)
+- **Efficiency**: Maximum power efficiency, may cost more
+- **Cost**: Cheapest design that meets specs
+- **Accuracy**: Most precise voltage regulation
+"""
+    
+    return fig, report
+
+
 def update_voltage_ranges(topology):
     """Update voltage sliders based on topology."""
     topo_info = TOPOLOGIES[topology]
@@ -738,8 +1044,23 @@ def create_demo():
             
             with gr.Column(scale=2):
                 gr.Markdown("## 📊 Design Results")
-                plot_output = gr.Plot(label="Visualization")
-                results_output = gr.Markdown()
+                
+                with gr.Tabs():
+                    with gr.Tab("🎨 Visualization"):
+                        plot_output = gr.Plot(label="Visualization")
+                        results_output = gr.Markdown()
+                    
+                    with gr.Tab("🔬 Advanced Analysis"):
+                        gr.Markdown("*Analyze prediction confidence and robustness*")
+                        analyze_btn = gr.Button("🔬 Run Analysis", variant="secondary")
+                        analysis_plot = gr.Plot(label="Analysis")
+                        analysis_output = gr.Markdown()
+                    
+                    with gr.Tab("🎯 Pareto Optimization"):
+                        gr.Markdown("*Find optimal trade-offs between efficiency, cost, and accuracy*")
+                        pareto_btn = gr.Button("🎯 Optimize", variant="secondary")
+                        pareto_plot = gr.Plot(label="Pareto Front")
+                        pareto_output = gr.Markdown()
         
         # Update voltage ranges when topology changes
         topology.change(
@@ -752,6 +1073,20 @@ def create_demo():
             fn=design_circuit,
             inputs=[topology, v_in, v_out, i_out, ripple, f_sw, steps],
             outputs=[plot_output, results_output]
+        )
+        
+        # Advanced analysis button
+        analyze_btn.click(
+            fn=run_advanced_analysis,
+            inputs=[topology, v_in, v_out, i_out, f_sw],
+            outputs=[analysis_plot, analysis_output]
+        )
+        
+        # Pareto optimization button
+        pareto_btn.click(
+            fn=run_pareto_optimization,
+            inputs=[topology, v_out],
+            outputs=[pareto_plot, pareto_output]
         )
         
         gr.Markdown("""
