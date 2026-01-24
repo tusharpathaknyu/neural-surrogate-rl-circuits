@@ -26,8 +26,13 @@ from rl.environment import CircuitDesignEnv
 from rl.ppo_agent import PPOAgent
 
 
-# Device
-DEVICE = 'mps' if torch.backends.mps.is_available() else 'cpu'
+# Device - prioritize CUDA (Colab), then MPS (Mac), then CPU
+if torch.cuda.is_available():
+    DEVICE = 'cuda'
+elif torch.backends.mps.is_available():
+    DEVICE = 'mps'
+else:
+    DEVICE = 'cpu'
 print(f"Using device: {DEVICE}")
 
 # Topologies to train on
