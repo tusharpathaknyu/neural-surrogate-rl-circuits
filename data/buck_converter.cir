@@ -1,0 +1,46 @@
+* Buck Converter SPICE Netlist
+* Parameters will be substituted by Python script
+
+.param L_val = 47u
+.param C_val = 100u
+.param R_load = 10
+.param V_in = 12
+.param f_sw = 100k
+.param duty = 0.5
+
+* Input voltage source
+Vin input 0 DC {V_in}
+
+* Switch (simplified as voltage-controlled switch with PWM)
+* Using behavioral source for ideal switch
+Vctrl ctrl 0 PULSE(0 1 0 1n 1n {duty/f_sw} {1/f_sw})
+S1 input sw_out ctrl 0 SWITCH
+.model SWITCH SW(Ron=0.01 Roff=1Meg Vt=0.5 Vh=0.1)
+
+* Freewheeling diode
+D1 0 sw_out DIODE
+.model DIODE D(Is=1e-14 Rs=0.01 N=1.05)
+
+* LC filter
+L1 sw_out inductor_out {L_val} IC=0
+R_L inductor_out output 0.01  ; Small ESR
+C1 output 0 {C_val} IC={V_in*duty}
+
+* Load
+Rload output 0 {R_load}
+
+* Analysis
+.tran 100n 5m 0 100n UIC
+
+* Measurements
+.measure tran V_avg AVG V(output) FROM=4m TO=5m
+.measure tran V_ripple PP V(output) FROM=4m TO=5m
+.measure tran I_avg AVG I(L1) FROM=4m TO=5m
+.measure tran efficiency PARAM {V_avg*I_avg/(V_in*I_avg/duty)}
+
+.control
+run
+wrdata output.csv V(output) I(L1)
+.endc
+
+.end
