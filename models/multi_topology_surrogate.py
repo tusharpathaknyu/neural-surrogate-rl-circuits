@@ -1,256 +1,329 @@
 """
 Multi-Topology Forward Surrogate.
 
-Extends the base surrogate to handle multiple circuit topologies:
+Supports 6 circuit topologies:
 - Buck converter (step-down)
-- Boost converter (step-up)
+- Boost converter (step-up)  
 - Buck-Boost converter (inverted, step-up/down)
+- SEPIC (Single-Ended Primary-Inductor Converter)
+- Ćuk converter (inverted output)
+- Flyback converter (isolated)
 
-Uses topology embedding + shared backbone architecture.
+Architecture matches the trained checkpoint.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 from pathlib import Path
-
-
-class TopologyEmbedding(nn.Module):
-    """Learnable embedding for circuit topology."""
-    
-    def __init__(self, num_topologies: int = 3, embed_dim: int = 32):
-        super().__init__()
-        self.embedding = nn.Embedding(num_topologies, embed_dim)
-        self.topology_map = {'buck': 0, 'boost': 1, 'buck_boost': 2}
-    
-    def forward(self, topology_ids: torch.Tensor) -> torch.Tensor:
-        return self.embedding(topology_ids)
-    
-    def get_id(self, topology: str) -> int:
-        return self.topology_map.get(topology, 0)
 
 
 class MultiTopologySurrogate(nn.Module):
     """
-    Neural surrogate for multiple circuit topologies.
+    Neural surrogate supporting multiple circuit topologies.
+    
+    This architecture matches the trained checkpoint.
     
     Input: [L, C, R_load, V_in, f_sw, duty] + topology_id
-    Output: 512-point waveform
+    Output: 512-point waveform + metrics (efficiency, ripple)
     """
     
     PARAM_NAMES = ['L', 'C', 'R_load', 'V_in', 'f_sw', 'duty']
-    TOPOLOGIES = ['buck', 'boost', 'buck_boost']
+    TOPOLOGIES = ['buck', 'boost', 'buck_boost', 'sepic', 'cuk', 'flyback']
     
-    # Parameter normalization bounds (combined for all topologies)
+    # Parameter normalization bounds (extended for all topologies)
     PARAM_BOUNDS = {
         'L': (10e-6, 470e-6),
         'C': (47e-6, 1000e-6),
         'R_load': (2, 100),
-        'V_in': (5, 24),
+        'V_in': (5, 48),  # Extended range
         'f_sw': (50e3, 500e3),
         'duty': (0.2, 0.8),
     }
     
-    def __init__(
-        self,
-        param_dim: int = 6,
-        output_points: int = 512,
-        hidden_dim: int = 256,
-        num_topologies: int = 3,
-        topology_embed_dim: int = 32,
-    ):
+    def __init__(self, num_topologies=6, param_dim=6, waveform_len=512, 
+                 embed_dim=32, hidden_dim=256):
         super().__init__()
         
+        self.num_topologies = num_topologies
         self.param_dim = param_dim
-        self.output_points = output_points
+        self.waveform_len = waveform_len
         
-        # Topology embedding
-        self.topology_embed = TopologyEmbedding(num_topologies, topology_embed_dim)
+        # Topology embedding (direct nn.Embedding to match trained checkpoint)
+        self.topology_embedding = nn.Embedding(num_topologies, embed_dim)
         
-        # Parameter encoder (includes topology embedding)
-        input_dim = param_dim + topology_embed_dim
+        # Shared encoder
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(param_dim + embed_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+        )
+        
+        # Waveform generator
+        self.waveform_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 2),
-            nn.LayerNorm(hidden_dim * 2),
             nn.GELU(),
+            nn.Linear(hidden_dim * 2, waveform_len),
         )
         
-        # Topology-specific heads (learned specialization)
-        self.topology_heads = nn.ModuleDict({
-            'buck': nn.Linear(hidden_dim * 2, hidden_dim),
-            'boost': nn.Linear(hidden_dim * 2, hidden_dim),
-            'buck_boost': nn.Linear(hidden_dim * 2, hidden_dim),
-        })
-        
-        # Shared decoder
-        self.decoder = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+        # 1D conv refiner for temporal coherence
+        self.refiner = nn.Sequential(
+            nn.Conv1d(1, 16, kernel_size=7, padding=3),
             nn.GELU(),
-            nn.Linear(hidden_dim, output_points),
+            nn.Conv1d(16, 16, kernel_size=5, padding=2),
+            nn.GELU(),
+            nn.Conv1d(16, 1, kernel_size=3, padding=1),
         )
         
-        # Waveform refinement (1D conv)
-        self.refine = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=7, padding=3),
+        # Metrics head (efficiency, ripple)
+        self.metrics_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
             nn.GELU(),
-            nn.Conv1d(32, 32, kernel_size=5, padding=2),
-            nn.GELU(),
-            nn.Conv1d(32, 1, kernel_size=3, padding=1),
+            nn.Linear(64, 2),  # efficiency, ripple
+            nn.Sigmoid(),
         )
-        
-        # Output scaling per topology
-        self.output_scale = nn.ParameterDict({
-            'buck': nn.Parameter(torch.ones(1)),
-            'boost': nn.Parameter(torch.ones(1) * 1.5),
-            'buck_boost': nn.Parameter(torch.ones(1)),
-        })
-        
-        self._init_weights()
     
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+    @classmethod
+    def get_topology_id(cls, topology: str) -> int:
+        """Get topology ID from name."""
+        topology_map = {t: i for i, t in enumerate(cls.TOPOLOGIES)}
+        return topology_map.get(topology.lower(), 0)
     
     def normalize_params(self, params: torch.Tensor) -> torch.Tensor:
-        """Normalize parameters to [0, 1]."""
+        """Normalize parameters to [0, 1] range."""
         normalized = torch.zeros_like(params)
         for i, name in enumerate(self.PARAM_NAMES):
             low, high = self.PARAM_BOUNDS[name]
             if name in ['L', 'C', 'f_sw']:
-                # Log scale
-                normalized[:, i] = (torch.log(params[:, i]) - np.log(low)) / (np.log(high) - np.log(low))
+                # Log scale normalization
+                log_val = torch.log(params[:, i].clamp(min=low))
+                normalized[:, i] = (log_val - np.log(low)) / (np.log(high) - np.log(low))
             else:
                 normalized[:, i] = (params[:, i] - low) / (high - low)
         return normalized.clamp(0, 1)
     
-    def forward(
-        self,
-        params: torch.Tensor,
-        topology_ids: Optional[torch.Tensor] = None,
-        topology_names: Optional[list] = None,
-        normalize: bool = True,
-    ) -> torch.Tensor:
+    def forward(self, params: torch.Tensor, topology_ids: torch.Tensor,
+                normalize: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass.
         
         Args:
-            params: [batch, 6] circuit parameters
-            topology_ids: [batch] integer topology IDs (0=buck, 1=boost, 2=buck_boost)
-            topology_names: list of topology name strings (alternative to ids)
-            normalize: whether to normalize inputs
+            params: (batch, param_dim) - circuit parameters
+            topology_ids: (batch,) - integer topology IDs
+            normalize: whether to normalize inputs (False if already normalized)
+        
+        Returns:
+            waveforms: (batch, waveform_len)
+            metrics: (batch, 2) - efficiency, ripple
         """
-        batch_size = params.shape[0]
-        device = params.device
-        
-        # Handle topology specification
-        if topology_ids is None and topology_names is None:
-            topology_ids = torch.zeros(batch_size, dtype=torch.long, device=device)
-        elif topology_names is not None:
-            topology_ids = torch.tensor(
-                [self.topology_embed.get_id(t) for t in topology_names],
-                dtype=torch.long, device=device
-            )
-        
-        # Normalize parameters
+        # Normalize if needed
         if normalize:
             params = self.normalize_params(params)
         
         # Get topology embedding
-        topo_embed = self.topology_embed(topology_ids)
+        topo_embed = self.topology_embedding(topology_ids)  # (batch, embed_dim)
         
-        # Combine params with topology
-        x = torch.cat([params, topo_embed], dim=-1)
+        # Concatenate params and topology
+        x = torch.cat([params, topo_embed], dim=1)  # (batch, param_dim + embed_dim)
         
         # Encode
-        features = self.encoder(x)
+        features = self.encoder(x)  # (batch, hidden_dim)
         
-        # Apply topology-specific heads (soft routing based on topology)
-        outputs = []
-        for i in range(batch_size):
-            topo_name = self.TOPOLOGIES[topology_ids[i].item()]
-            head_out = self.topology_heads[topo_name](features[i:i+1])
-            outputs.append(head_out)
-        features = torch.cat(outputs, dim=0)
-        
-        # Decode to waveform
-        waveform = self.decoder(features)
+        # Generate waveform
+        waveform = self.waveform_head(features)  # (batch, waveform_len)
         
         # Refine with conv
-        waveform = waveform.unsqueeze(1)  # [batch, 1, 512]
-        waveform = waveform + self.refine(waveform)
-        waveform = waveform.squeeze(1)  # [batch, 512]
+        waveform = waveform.unsqueeze(1)  # (batch, 1, waveform_len)
+        waveform = waveform + self.refiner(waveform)  # residual
+        waveform = waveform.squeeze(1)  # (batch, waveform_len)
         
-        # Scale by topology
-        for i in range(batch_size):
-            topo_name = self.TOPOLOGIES[topology_ids[i].item()]
-            waveform[i] = waveform[i] * self.output_scale[topo_name]
+        # Predict metrics
+        metrics = self.metrics_head(features)
         
+        return waveform, metrics
+    
+    def predict_waveform(self, params: torch.Tensor, topology: str,
+                         normalize: bool = True) -> torch.Tensor:
+        """
+        Convenience method to predict waveform for a single topology.
+        
+        Args:
+            params: (batch, 6) circuit parameters
+            topology: topology name string
+            normalize: whether to normalize inputs
+            
+        Returns:
+            waveform: (batch, 512)
+        """
+        device = params.device
+        batch_size = params.shape[0]
+        topology_id = self.get_topology_id(topology)
+        topology_ids = torch.full((batch_size,), topology_id, dtype=torch.long, device=device)
+        
+        waveform, _ = self.forward(params, topology_ids, normalize=normalize)
         return waveform
 
 
 class MultiTopologySurrogateWithMetrics(MultiTopologySurrogate):
-    """Extended surrogate with engineering metrics computation."""
+    """Extended surrogate with additional engineering metrics computation."""
     
-    def compute_metrics(self, waveform: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Compute power electronics metrics from waveform."""
+    def compute_engineering_metrics(self, waveform: torch.Tensor, 
+                                    v_in: torch.Tensor,
+                                    duty: torch.Tensor,
+                                    topology: str) -> Dict[str, torch.Tensor]:
+        """
+        Compute power electronics metrics from waveform.
+        
+        Args:
+            waveform: (batch, 512) output voltage waveform
+            v_in: (batch,) input voltage
+            duty: (batch,) duty cycle
+            topology: topology name
+        
+        Returns:
+            Dictionary of engineering metrics
+        """
         metrics = {}
         
-        # DC component (mean)
-        metrics['v_dc'] = waveform.mean(dim=-1)
+        # DC component (mean output voltage)
+        v_dc = waveform.mean(dim=-1)
+        metrics['v_out'] = v_dc
         
         # Ripple (peak-to-peak)
-        metrics['ripple_pp'] = waveform.max(dim=-1)[0] - waveform.min(dim=-1)[0]
-        
-        # RMS
-        metrics['v_rms'] = torch.sqrt((waveform ** 2).mean(dim=-1))
+        ripple_pp = waveform.max(dim=-1)[0] - waveform.min(dim=-1)[0]
+        metrics['ripple_pp'] = ripple_pp
         
         # Ripple percentage
-        metrics['ripple_pct'] = metrics['ripple_pp'] / (metrics['v_dc'].abs() + 1e-6) * 100
+        metrics['ripple_pct'] = ripple_pp / (v_dc.abs() + 1e-6) * 100
+        
+        # RMS voltage
+        metrics['v_rms'] = torch.sqrt((waveform ** 2).mean(dim=-1))
+        
+        # Theoretical output voltage based on topology
+        if topology == 'buck':
+            v_out_ideal = v_in * duty
+        elif topology == 'boost':
+            v_out_ideal = v_in / (1 - duty + 1e-6)
+        elif topology in ['buck_boost', 'cuk']:
+            v_out_ideal = v_in * duty / (1 - duty + 1e-6)
+        elif topology == 'sepic':
+            v_out_ideal = v_in * duty / (1 - duty + 1e-6)
+        elif topology == 'flyback':
+            # Assuming 1:1 turns ratio
+            v_out_ideal = v_in * duty / (1 - duty + 1e-6)
+        else:
+            v_out_ideal = v_dc
+            
+        metrics['v_out_ideal'] = v_out_ideal
+        
+        # Regulation accuracy (how close to ideal)
+        metrics['regulation_error'] = (v_dc - v_out_ideal).abs() / (v_out_ideal.abs() + 1e-6) * 100
         
         return metrics
     
     def forward_with_metrics(
         self,
         params: torch.Tensor,
-        topology_ids: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> tuple:
-        waveform = self.forward(params, topology_ids, **kwargs)
-        metrics = self.compute_metrics(waveform)
+        topology_ids: torch.Tensor,
+        normalize: bool = False,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Forward pass with full metrics.
+        
+        Returns:
+            waveform: (batch, 512)
+            metrics: dict with efficiency, ripple, v_out, etc.
+        """
+        waveform, raw_metrics = self.forward(params, topology_ids, normalize)
+        
+        # Extract efficiency and ripple from network
+        metrics = {
+            'efficiency': raw_metrics[:, 0],  # 0-1 range
+            'ripple_norm': raw_metrics[:, 1],  # normalized ripple
+        }
+        
+        # Add waveform-based metrics
+        v_dc = waveform.mean(dim=-1)
+        ripple_pp = waveform.max(dim=-1)[0] - waveform.min(dim=-1)[0]
+        
+        metrics['v_out'] = v_dc
+        metrics['ripple_pp'] = ripple_pp
+        metrics['ripple_pct'] = ripple_pp / (v_dc.abs() + 1e-6) * 100
+        
         return waveform, metrics
+
+
+def load_trained_model(checkpoint_path: str = None, device: str = 'cpu') -> MultiTopologySurrogate:
+    """
+    Load the trained multi-topology surrogate model.
+    
+    Args:
+        checkpoint_path: path to checkpoint file (default: auto-detect)
+        device: device to load model on
+        
+    Returns:
+        Loaded MultiTopologySurrogate model
+    """
+    if checkpoint_path is None:
+        # Auto-detect checkpoint
+        default_paths = [
+            Path(__file__).parent.parent / 'checkpoints' / 'multi_topology_surrogate.pt',
+            Path('checkpoints/multi_topology_surrogate.pt'),
+        ]
+        for path in default_paths:
+            if path.exists():
+                checkpoint_path = str(path)
+                break
+    
+    if checkpoint_path is None or not Path(checkpoint_path).exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    
+    # Load checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    
+    # Create model
+    model = MultiTopologySurrogate()
+    
+    # Load state dict
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        model.load_state_dict(checkpoint)
+    
+    model.to(device)
+    model.eval()
+    
+    return model
 
 
 def test_multi_topology():
     """Test multi-topology surrogate."""
     print("Testing Multi-Topology Surrogate...")
     
-    model = MultiTopologySurrogateWithMetrics()
+    model = MultiTopologySurrogate()
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Test each topology
-    for topo in ['buck', 'boost', 'buck_boost']:
+    for i, topo in enumerate(MultiTopologySurrogate.TOPOLOGIES):
         params = torch.randn(4, 6).abs() * 0.5 + 0.25  # Random normalized params
-        topology_names = [topo] * 4
+        topology_ids = torch.full((4,), i, dtype=torch.long)
         
-        waveform, metrics = model.forward_with_metrics(
-            params, topology_names=topology_names, normalize=False
-        )
+        waveform, metrics = model(params, topology_ids)
         
         print(f"\n{topo}:")
         print(f"  Output shape: {waveform.shape}")
-        print(f"  V_dc: {metrics['v_dc'].mean():.2f}V")
-        print(f"  Ripple: {metrics['ripple_pct'].mean():.1f}%")
+        print(f"  V_dc: {waveform.mean():.2f}V")
+        print(f"  Efficiency: {metrics[:, 0].mean():.1%}")
     
     print("\n✓ Multi-topology surrogate test passed!")
 

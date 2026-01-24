@@ -42,10 +42,11 @@ class CircuitDesignEnv:
     
     def __init__(
         self,
-        surrogate: ForwardSurrogate,
+        surrogate,
         max_steps: int = 50,
         device: str = 'cpu',
         target_waveforms: Optional[np.ndarray] = None,
+        topology: str = 'buck',
     ):
         self.surrogate = surrogate.to(device)
         self.surrogate.eval()
@@ -55,6 +56,10 @@ class CircuitDesignEnv:
         self.device = device
         self.max_steps = max_steps
         self.target_waveforms = target_waveforms
+        self.topology = topology
+        
+        # Check if surrogate is multi-topology
+        self.is_multi_topology = hasattr(surrogate, 'topology_embedding')
         
         # State and action dimensions
         self.state_dim = self.NUM_WAVEFORM_FEATURES + self.NUM_PARAMS + 3
@@ -106,7 +111,17 @@ class CircuitDesignEnv:
         """Run circuit through surrogate model - THE FAST PART!"""
         with torch.no_grad():
             params_tensor = torch.tensor(params, dtype=torch.float32).unsqueeze(0).to(self.device)
-            waveform = self.surrogate(params_tensor, normalize=True)
+            
+            if self.is_multi_topology:
+                # Multi-topology model needs topology_ids
+                topology_map = {'buck': 0, 'boost': 1, 'buck_boost': 2, 'sepic': 3, 'cuk': 4, 'flyback': 5}
+                topology_id = topology_map.get(self.topology, 0)
+                topology_ids = torch.tensor([topology_id], dtype=torch.long, device=self.device)
+                waveform, _ = self.surrogate(params_tensor, topology_ids, normalize=True)
+            else:
+                # Legacy single-topology model
+                waveform = self.surrogate(params_tensor, normalize=True)
+            
             return waveform.cpu().numpy().squeeze()
     
     def _get_state(self) -> np.ndarray:

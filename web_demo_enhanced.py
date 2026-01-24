@@ -31,6 +31,7 @@ except ImportError:
     print("Gradio not installed. Run: pip install gradio")
 
 from models.forward_surrogate import ForwardSurrogate
+from models.multi_topology_surrogate import MultiTopologySurrogate
 from rl.environment import CircuitDesignEnv
 from rl.ppo_agent import PPOAgent
 
@@ -152,12 +153,21 @@ def load_models():
     
     DEVICE = 'mps' if torch.backends.mps.is_available() else 'cpu'
     
-    # Load surrogate
-    SURROGATE = ForwardSurrogate()
-    ckpt_path = Path('checkpoints/best_model.pt')
+    # Load multi-topology surrogate (trained on 6 topologies, 30k samples)
+    SURROGATE = MultiTopologySurrogate(num_topologies=6)
+    ckpt_path = Path('checkpoints/multi_topology_surrogate.pt')
     if ckpt_path.exists():
         ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
         SURROGATE.load_state_dict(ckpt['model_state_dict'])
+        print(f"✓ Loaded multi-topology surrogate (val_loss={ckpt.get('val_loss', 'N/A'):.4f})")
+    else:
+        # Fallback to old model
+        ckpt_path = Path('checkpoints/best_model.pt')
+        SURROGATE = ForwardSurrogate()
+        if ckpt_path.exists():
+            ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
+            SURROGATE.load_state_dict(ckpt['model_state_dict'])
+            print("✓ Loaded legacy surrogate (single topology)")
     SURROGATE.to(DEVICE)
     SURROGATE.eval()
     
@@ -350,6 +360,17 @@ def design_circuit(topology: str, v_in: float, v_out: float,
     
     # Validate voltage conversion is possible
     topo_info = TOPOLOGIES[topology]
+    
+    # Map display name to model topology name
+    topo_name_map = {
+        "Buck (Step-Down)": "buck",
+        "Boost (Step-Up)": "boost",
+        "Buck-Boost (Inverting)": "buck_boost",
+        "SEPIC (Non-Inverting)": "sepic",
+        "Ćuk (Continuous Current)": "cuk",
+        "Flyback (Isolated)": "flyback",
+    }
+    ENV.topology = topo_name_map.get(topology, "buck")
     
     # Check if conversion is valid
     can_convert = True
