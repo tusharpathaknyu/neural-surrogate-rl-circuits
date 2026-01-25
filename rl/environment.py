@@ -108,7 +108,10 @@ class CircuitDesignEnv:
         return np.array(features[:self.NUM_WAVEFORM_FEATURES], dtype=np.float32)
     
     def _simulate(self, params: np.ndarray) -> np.ndarray:
-        """Run circuit through surrogate model - THE FAST PART!"""
+        """Run circuit through surrogate model - THE FAST PART!
+        
+        Returns denormalized voltage waveform using physics-based scaling.
+        """
         with torch.no_grad():
             params_tensor = torch.tensor(params, dtype=torch.float32).unsqueeze(0).to(self.device)
             
@@ -117,7 +120,12 @@ class CircuitDesignEnv:
                 topology_map = {'buck': 0, 'boost': 1, 'buck_boost': 2, 'sepic': 3, 'cuk': 4, 'flyback': 5}
                 topology_id = topology_map.get(self.topology, 0)
                 topology_ids = torch.tensor([topology_id], dtype=torch.long, device=self.device)
-                waveform, _ = self.surrogate(params_tensor, topology_ids, normalize=True)
+                
+                # Use predict_voltage for denormalized output
+                if hasattr(self.surrogate, 'predict_voltage'):
+                    waveform, _ = self.surrogate.predict_voltage(params_tensor, self.topology)
+                else:
+                    waveform, _ = self.surrogate(params_tensor, topology_ids, normalize=True)
             else:
                 # Legacy single-topology model
                 waveform = self.surrogate(params_tensor, normalize=True)

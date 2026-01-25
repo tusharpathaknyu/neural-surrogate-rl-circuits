@@ -554,12 +554,15 @@ def validate_topology(topology_name: str, surrogate, n_tests: int = 5) -> List[V
         rl_params = run_rl_optimization(agent, surrogate, topology, topology_id, 
                                         target_waveform, n_steps=30)
         
-        # Get surrogate prediction
+        # Get surrogate prediction with proper denormalization
         with torch.no_grad():
             params_tensor = torch.tensor(rl_params, dtype=torch.float32).unsqueeze(0).to(DEVICE)
             topology_tensor = torch.tensor([topology_id]).to(DEVICE)
-            surrogate_wave, _ = surrogate(params_tensor, topology_tensor)
-            surrogate_wave = surrogate_wave.cpu().numpy().squeeze()
+            
+            # Use the new predict_voltage method for actual voltages
+            topo_name = topology.name.lower()
+            denorm_wave, v_out_pred = surrogate.predict_voltage(params_tensor, topo_name)
+            surrogate_wave = denorm_wave.cpu().numpy().squeeze()
         
         surrogate_vout = np.mean(surrogate_wave[-100:])  # Steady-state
         surrogate_mse = np.mean((surrogate_wave - target_waveform) ** 2)

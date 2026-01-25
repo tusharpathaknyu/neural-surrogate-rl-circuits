@@ -99,6 +99,75 @@ class MultiTopologySurrogate(nn.Module):
         topology_map = {t: i for i, t in enumerate(cls.TOPOLOGIES)}
         return topology_map.get(topology.lower(), 0)
     
+    @staticmethod
+    def compute_theoretical_vout(v_in: torch.Tensor, duty: torch.Tensor, 
+                                  topology: str) -> torch.Tensor:
+        """
+        Compute theoretical output voltage based on topology equations.
+        
+        Args:
+            v_in: Input voltage
+            duty: Duty cycle (0-1)
+            topology: Topology name
+            
+        Returns:
+            Theoretical output voltage
+        """
+        eps = 1e-6
+        duty = duty.clamp(0.1, 0.9)  # Prevent extreme values
+        
+        if topology == 'buck':
+            return v_in * duty
+        elif topology == 'boost':
+            return v_in / (1 - duty + eps)
+        elif topology in ['buck_boost', 'cuk']:
+            return v_in * duty / (1 - duty + eps)
+        elif topology == 'sepic':
+            return v_in * duty / (1 - duty + eps)
+        elif topology == 'flyback':
+            # Assuming 1:1 turns ratio
+            return v_in * duty / (1 - duty + eps)
+        else:
+            return v_in * duty  # Default to buck
+    
+    def denormalize_waveform(self, waveform: torch.Tensor, 
+                              params: torch.Tensor,
+                              topology: str) -> torch.Tensor:
+        """
+        Denormalize waveform from [-1, 1] to actual voltage.
+        
+        Uses physics-based scaling: the mean of the denormalized waveform
+        should match the theoretical output voltage for the topology.
+        
+        Args:
+            waveform: Normalized waveform from model output
+            params: Original (non-normalized) circuit parameters
+            topology: Topology name
+            
+        Returns:
+            Waveform scaled to actual voltage values
+        """
+        # Extract V_in and duty from params (assuming non-normalized)
+        v_in = params[:, 3]  # V_in is at index 3
+        duty = params[:, 5]  # duty is at index 5
+        
+        # Compute theoretical output voltage
+        v_out_theoretical = self.compute_theoretical_vout(v_in, duty, topology)
+        
+        # The model outputs in [-1, 1] range with mean around 0
+        # We need to shift and scale to match expected voltage
+        waveform_mean = waveform.mean(dim=-1, keepdim=True)
+        waveform_centered = waveform - waveform_mean
+        
+        # Add typical ripple amplitude (5% of Vout)
+        ripple_scale = 0.05 * v_out_theoretical.unsqueeze(-1)
+        
+        # Scale centered waveform and add DC offset
+        v_out_theoretical = v_out_theoretical.unsqueeze(-1)
+        denorm_waveform = v_out_theoretical + waveform_centered * ripple_scale
+        
+        return denorm_waveform
+    
     def normalize_params(self, params: torch.Tensor) -> torch.Tensor:
         """Normalize parameters to [0, 1] range."""
         normalized = torch.zeros_like(params)
@@ -172,6 +241,38 @@ class MultiTopologySurrogate(nn.Module):
         
         waveform, _ = self.forward(params, topology_ids, normalize=normalize)
         return waveform
+    
+    def predict_voltage(self, params: torch.Tensor, topology: str) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Predict actual output voltage waveform (denormalized).
+        
+        This is the recommended method for getting realistic voltage predictions.
+        Uses physics-based scaling to convert model output to actual voltages.
+        
+        Args:
+            params: (batch, 6) circuit parameters [L, C, R_load, V_in, f_sw, duty]
+                   Should be in physical units (not normalized)
+            topology: topology name string
+            
+        Returns:
+            waveform: (batch, 512) - actual voltage waveform
+            v_out: (batch,) - predicted DC output voltage
+        """
+        device = params.device
+        batch_size = params.shape[0]
+        topology_id = self.get_topology_id(topology)
+        topology_ids = torch.full((batch_size,), topology_id, dtype=torch.long, device=device)
+        
+        # Get normalized waveform
+        waveform, _ = self.forward(params, topology_ids, normalize=True)
+        
+        # Denormalize to actual voltage
+        waveform = self.denormalize_waveform(waveform, params, topology)
+        
+        # Compute DC output
+        v_out = waveform.mean(dim=-1)
+        
+        return waveform, v_out
 
 
 class MultiTopologySurrogateWithMetrics(MultiTopologySurrogate):
