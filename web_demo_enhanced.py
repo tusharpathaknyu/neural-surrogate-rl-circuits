@@ -176,6 +176,7 @@ TOPOLOGY_AGENT_CONFIG = {
     'sepic': {'hidden_dim': 512},
     'cuk': {'hidden_dim': 256},
     'flyback': {'hidden_dim': 512},
+    'qr_flyback': {'hidden_dim': 512},
 }
 
 
@@ -185,8 +186,8 @@ def load_models():
     
     DEVICE = 'mps' if torch.backends.mps.is_available() else 'cpu'
     
-    # Load multi-topology surrogate (trained on 6 topologies, 30k samples)
-    SURROGATE = MultiTopologySurrogate(num_topologies=6)
+    # Load multi-topology surrogate (trained on 7 topologies, 35k samples)
+    SURROGATE = MultiTopologySurrogate(num_topologies=7)
     ckpt_path = Path('checkpoints/multi_topology_surrogate.pt')
     if ckpt_path.exists():
         ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
@@ -245,6 +246,7 @@ def get_agent_for_topology(topology_name: str):
         "SEPIC (Non-Inverting)": "sepic",
         "Ćuk (Continuous Current)": "cuk",
         "Flyback (Isolated)": "flyback",
+        "QR Flyback (Soft-Switching)": "qr_flyback",
     }
     topo_key = topo_map.get(topology_name, "buck")
     
@@ -818,6 +820,7 @@ def run_advanced_analysis(topology: str, v_in: float, v_out: float,
         "SEPIC (Non-Inverting)": "sepic",
         "Ćuk (Continuous Current)": "cuk",
         "Flyback (Isolated)": "flyback",
+        "QR Flyback (Soft-Switching)": "qr_flyback",
     }
     topo = topo_name_map.get(topology, "buck")
     
@@ -836,7 +839,7 @@ def run_advanced_analysis(topology: str, v_in: float, v_out: float,
     
     topology_ids = torch.tensor([topo_name_map.get(topology, 0) if isinstance(topo_name_map.get(topology, 0), int) 
                                   else list(topo_name_map.values()).index(topo)])
-    topology_ids = torch.tensor([{'buck': 0, 'boost': 1, 'buck_boost': 2, 'sepic': 3, 'cuk': 4, 'flyback': 5}[topo]])
+    topology_ids = torch.tensor([{'buck': 0, 'boost': 1, 'buck_boost': 2, 'sepic': 3, 'cuk': 4, 'flyback': 5, 'qr_flyback': 6}[topo]])
     
     # 1. Uncertainty Analysis
     uncertainty_result = UNCERTAINTY_ESTIMATOR.predict_with_uncertainty(params, topology_ids)
@@ -983,6 +986,7 @@ def run_pareto_optimization(topology: str, v_out_target: float) -> tuple:
         "SEPIC (Non-Inverting)": "sepic",
         "Ćuk (Continuous Current)": "cuk",
         "Flyback (Isolated)": "flyback",
+        "QR Flyback (Soft-Switching)": "qr_flyback",
     }
     topo = topo_name_map.get(topology, "buck")
     
