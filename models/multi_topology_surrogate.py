@@ -94,21 +94,30 @@ class MultiTopologySurrogate(nn.Module):
         )
     
     @classmethod
-    def get_topology_id(cls, topology: str) -> int:
-        """Get topology ID from name."""
+    def get_topology_id(cls, topology) -> int:
+        """Get topology ID from name or return if already int."""
+        if isinstance(topology, int):
+            return topology
         topology_map = {t: i for i, t in enumerate(cls.TOPOLOGIES)}
         return topology_map.get(topology.lower(), 0)
     
-    @staticmethod
-    def compute_theoretical_vout(v_in: torch.Tensor, duty: torch.Tensor, 
-                                  topology: str) -> torch.Tensor:
+    @classmethod
+    def get_topology_name(cls, topology) -> str:
+        """Get topology name from ID or return if already string."""
+        if isinstance(topology, str):
+            return topology.lower()
+        return cls.TOPOLOGIES[topology] if 0 <= topology < len(cls.TOPOLOGIES) else 'buck'
+    
+    @classmethod
+    def compute_theoretical_vout(cls, v_in: torch.Tensor, duty: torch.Tensor, 
+                                  topology) -> torch.Tensor:
         """
         Compute theoretical output voltage based on topology equations.
         
         Args:
             v_in: Input voltage
             duty: Duty cycle (0-1)
-            topology: Topology name
+            topology: Topology name (str) or ID (int)
             
         Returns:
             Theoretical output voltage
@@ -116,15 +125,18 @@ class MultiTopologySurrogate(nn.Module):
         eps = 1e-6
         duty = duty.clamp(0.1, 0.9)  # Prevent extreme values
         
-        if topology == 'buck':
+        # Convert to string if int
+        topo_name = cls.get_topology_name(topology)
+        
+        if topo_name == 'buck':
             return v_in * duty
-        elif topology == 'boost':
+        elif topo_name == 'boost':
             return v_in / (1 - duty + eps)
-        elif topology in ['buck_boost', 'cuk']:
+        elif topo_name in ['buck_boost', 'cuk']:
             return v_in * duty / (1 - duty + eps)
-        elif topology == 'sepic':
+        elif topo_name == 'sepic':
             return v_in * duty / (1 - duty + eps)
-        elif topology == 'flyback':
+        elif topo_name == 'flyback':
             # Assuming 1:1 turns ratio
             return v_in * duty / (1 - duty + eps)
         else:
@@ -132,7 +144,7 @@ class MultiTopologySurrogate(nn.Module):
     
     def denormalize_waveform(self, waveform: torch.Tensor, 
                               params: torch.Tensor,
-                              topology: str) -> torch.Tensor:
+                              topology) -> torch.Tensor:
         """
         Denormalize waveform from [-1, 1] to actual voltage.
         
@@ -142,7 +154,7 @@ class MultiTopologySurrogate(nn.Module):
         Args:
             waveform: Normalized waveform from model output
             params: Original (non-normalized) circuit parameters
-            topology: Topology name
+            topology: Topology name (str) or ID (int)
             
         Returns:
             Waveform scaled to actual voltage values
