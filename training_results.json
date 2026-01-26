@@ -1,0 +1,16 @@
+{
+  "start_time": "2026-01-26T00:30:21.241187",
+  "quick_mode": false,
+  "spice_enabled": true,
+  "surrogate_trained": false,
+  "agent_results": {
+    "buck": "success",
+    "boost": "success",
+    "buck_boost": "success",
+    "sepic": "success",
+    "cuk": "success",
+    "flyback": "success",
+    "qr_flyback": "success"
+  },
+  "end_time": "2026-01-26T18:14:14.207967"
+}

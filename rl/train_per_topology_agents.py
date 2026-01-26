@@ -3,6 +3,8 @@ Train Separate RL Agents Per Topology.
 
 Each topology gets its own specialized agent for optimal performance.
 This approach typically gives 2-5x better results than a single multi-topology agent.
+
+NEW: Supports SPICE-enhanced training for ground-truth validation.
 """
 
 import sys
@@ -29,54 +31,151 @@ else:
     DEVICE = 'cpu'
 print(f"Using device: {DEVICE}")
 
-# All topologies
-TOPOLOGIES = ['buck', 'boost', 'buck_boost', 'sepic', 'cuk', 'flyback']
+# All topologies (7 total, including QR Flyback)
+TOPOLOGIES = ['buck', 'boost', 'buck_boost', 'sepic', 'cuk', 'flyback', 'qr_flyback']
 
-# Per-topology hyperparameters (tuned for each topology's characteristics)
+# ============================================================================
+# PHYSICS-INFORMED HYPERPARAMETER TUNING
+# ============================================================================
+# Each topology has unique dynamics that require different optimization strategies:
+#
+# COMPLEXITY TIERS:
+#   Tier 1 (Simple):    Buck - linear V_out = V_in * D, stable across duty range
+#   Tier 2 (Moderate):  Buck-Boost, Ćuk - inverting, discontinuous currents
+#   Tier 3 (Complex):   Boost, SEPIC, Flyback - nonlinear, unstable at high duty
+#
+# KEY CONSIDERATIONS:
+#   - High duty cycle instability (Boost, SEPIC, Flyback approach infinity as D→1)
+#   - Coupled inductors (SEPIC, Ćuk, Flyback) need larger networks
+#   - Transformer dynamics (Flyback) have additional magnetizing inductance
+#   - Inverting topologies (Buck-Boost, Ćuk) have polarity considerations
+# ============================================================================
+
 TOPOLOGY_CONFIG = {
     'buck': {
+        # === TIER 1: SIMPLE ===
+        # Linear relationship: V_out = V_in × D
+        # Stable across entire duty cycle range
+        # Fastest to converge, smallest network sufficient
         'hidden_dim': 256,
-        'lr': 3e-4,
+        'lr': 3e-4,           # Higher LR - simple landscape
         'n_iterations': 300,
         'steps_per_iter': 2048,
-        'description': 'Simple step-down, easiest to optimize',
+        'gamma': 0.99,        # Standard discount
+        'gae_lambda': 0.95,
+        'clip_epsilon': 0.2,  # Standard clipping
+        'entropy_coef': 0.01, # Standard exploration
+        'description': 'Simple step-down, linear V_out=V_in×D, stable across all duty cycles',
     },
     'boost': {
+        # === TIER 3: COMPLEX ===
+        # Nonlinear: V_out = V_in / (1-D), approaches infinity as D→1
+        # Unstable at high duty cycles (>0.8)
+        # Right-half-plane zero causes control challenges
+        # Needs conservative learning, more exploration
         'hidden_dim': 512,
-        'lr': 1e-4,
+        'lr': 1e-4,           # Lower LR - unstable dynamics
         'n_iterations': 500,
         'steps_per_iter': 4096,
-        'description': 'Step-up, needs more training due to instability at high duty',
+        'gamma': 0.995,       # Higher gamma - delayed rewards from instability
+        'gae_lambda': 0.97,
+        'clip_epsilon': 0.15, # Tighter clipping - prevent wild updates
+        'entropy_coef': 0.02, # More exploration for nonlinear landscape
+        'description': 'Nonlinear V_out=V_in/(1-D), RHP zero, unstable at high duty (>0.8)',
     },
     'buck_boost': {
+        # === TIER 2: MODERATE ===
+        # Inverting: V_out = -V_in × D/(1-D)
+        # Combines buck and boost challenges
+        # Discontinuous input and output currents
         'hidden_dim': 256,
-        'lr': 2e-4,
+        'lr': 2e-4,           # Moderate LR
         'n_iterations': 400,
         'steps_per_iter': 2048,
-        'description': 'Inverting topology, moderate complexity',
+        'gamma': 0.99,
+        'gae_lambda': 0.95,
+        'clip_epsilon': 0.18,
+        'entropy_coef': 0.015,
+        'description': 'Inverting, V_out=-V_in×D/(1-D), discontinuous currents',
     },
     'sepic': {
+        # === TIER 3: COMPLEX ===
+        # Non-inverting buck-boost: V_out = V_in × D/(1-D)
+        # Coupled inductors add energy storage dynamics
+        # Capacitor C1 transfers energy between stages
+        # More components = more degrees of freedom
         'hidden_dim': 512,
-        'lr': 1e-4,
+        'lr': 1e-4,           # Lower LR - coupled dynamics
         'n_iterations': 500,
         'steps_per_iter': 4096,
-        'description': 'Non-inverting buck-boost, needs coupled inductor handling',
+        'gamma': 0.995,       # Longer horizon for energy transfer
+        'gae_lambda': 0.97,
+        'clip_epsilon': 0.15,
+        'entropy_coef': 0.02, # Explore coupled inductor space
+        'description': 'Coupled inductors, energy transfer capacitor, 4+ reactive elements',
     },
     'cuk': {
+        # === TIER 2: MODERATE ===
+        # Inverting like buck-boost but with CONTINUOUS currents
+        # Better EMI characteristics, less filter needed
+        # Two inductors share energy via coupling capacitor
         'hidden_dim': 256,
         'lr': 2e-4,
         'n_iterations': 400,
         'steps_per_iter': 2048,
-        'description': 'Continuous current, good for low ripple',
+        'gamma': 0.99,
+        'gae_lambda': 0.95,
+        'clip_epsilon': 0.18,
+        'entropy_coef': 0.015,
+        'description': 'Continuous I/O currents, capacitive energy transfer, low ripple',
     },
     'flyback': {
+        # === TIER 3: COMPLEX (ISOLATED) ===
+        # Transformer provides galvanic isolation
+        # Magnetizing inductance stores energy (not just transfers)
+        # Leakage inductance causes voltage spikes
+        # Turns ratio (N) adds another design dimension
+        # Most complex dynamics due to transformer modeling
         'hidden_dim': 512,
-        'lr': 1e-4,
-        'n_iterations': 500,
+        'lr': 8e-5,           # Lowest LR - transformer dynamics
+        'n_iterations': 600,  # Most iterations - complex search space
         'steps_per_iter': 4096,
-        'description': 'Isolated, complex transformer dynamics',
+        'gamma': 0.997,       # Longest horizon - energy storage in transformer
+        'gae_lambda': 0.98,
+        'clip_epsilon': 0.12, # Tightest clipping - prevent divergence
+        'entropy_coef': 0.025,# Most exploration - transformer + converter params
+        'description': 'Isolated, transformer magnetics, leakage inductance, turns ratio N',
+    },
+    'qr_flyback': {
+        # === TIER 4: MOST COMPLEX (RESONANT + ISOLATED) ===
+        # Quasi-Resonant (QR) operation for soft switching
+        # Zero-Voltage Switching (ZVS) or Zero-Current Switching (ZCS)
+        # Resonant tank (Lr, Cr) creates sinusoidal transitions
+        # Variable frequency operation (valley switching)
+        # Reduced EMI and switching losses vs hard-switched flyback
+        # Additional resonant components add design complexity
+        'hidden_dim': 512,
+        'lr': 5e-5,           # Lowest LR - resonant + transformer dynamics
+        'n_iterations': 700,  # Most iterations - resonant timing critical
+        'steps_per_iter': 4096,
+        'gamma': 0.998,       # Longest horizon - resonant energy cycling
+        'gae_lambda': 0.98,
+        'clip_epsilon': 0.10, # Tightest clipping - resonance sensitive
+        'entropy_coef': 0.03, # High exploration - resonant frequency space
+        'description': 'QR soft-switching, ZVS/ZCS, variable freq, resonant tank Lr/Cr',
     },
 }
+
+# Validate all required keys exist
+REQUIRED_KEYS = ['hidden_dim', 'lr', 'n_iterations', 'steps_per_iter', 
+                 'gamma', 'gae_lambda', 'clip_epsilon', 'entropy_coef']
+for topo, config in TOPOLOGY_CONFIG.items():
+    for key in REQUIRED_KEYS:
+        if key not in config:
+            raise ValueError(f"Missing {key} in {topo} config")
+
+# SPICE validation settings
+USE_SPICE_GLOBALLY = False  # Will be set via command line
 
 
 def create_target_waveform(topology: str, v_in: float = 12.0, 
@@ -94,7 +193,8 @@ def create_target_waveform(topology: str, v_in: float = 12.0,
         v_out = abs(v_in * duty / (1 - duty + 0.01))
     elif topology == 'sepic':
         v_out = v_in * duty / (1 - duty + 0.01)
-    elif topology == 'flyback':
+    elif topology in ['flyback', 'qr_flyback']:
+        # QR Flyback has same DC transfer function, but lower ripple
         v_out = v_in * duty / (1 - duty + 0.01)
     else:
         v_out = v_in * duty
@@ -116,8 +216,23 @@ def create_target_waveform(topology: str, v_in: float = 12.0,
 class SingleTopologyEnv(CircuitDesignEnv):
     """Environment for training on a single topology."""
     
-    def __init__(self, surrogate, topology: str, device='cpu', **kwargs):
-        super().__init__(surrogate, device=device, **kwargs)
+    def __init__(self, surrogate, topology: str, device='cpu', 
+                 use_spice: bool = False, spice_freq: int = 10, **kwargs):
+        """
+        Args:
+            surrogate: Neural surrogate model
+            topology: Topology name (buck, boost, etc.)
+            device: CPU/CUDA/MPS
+            use_spice: Enable SPICE-based ground truth validation
+            spice_freq: Validate with SPICE every N steps (default 10)
+        """
+        super().__init__(
+            surrogate, 
+            device=device, 
+            use_spice_reward=use_spice,
+            spice_validation_freq=spice_freq,
+            **kwargs
+        )
         self.topology = topology
         self.topology_idx = TOPOLOGIES.index(topology)
         self.is_multi_topology = True  # Enables topology_id in simulation
@@ -149,8 +264,9 @@ class SingleTopologyEnv(CircuitDesignEnv):
         return self._get_state()
 
 
-def train_single_topology(topology: str, surrogate, quick_mode: bool = False):
-    """Train an agent for a single topology."""
+def train_single_topology(topology: str, surrogate, quick_mode: bool = False, 
+                          use_spice: bool = False, spice_freq: int = 10):
+    """Train an agent for a single topology with physics-informed hyperparameters."""
     
     config = TOPOLOGY_CONFIG[topology]
     
@@ -161,24 +277,31 @@ def train_single_topology(topology: str, surrogate, quick_mode: bool = False):
     print(f"\n{'='*60}")
     print(f"Training Agent for: {topology.upper()}")
     print(f"{'='*60}")
-    print(f"  {config['description']}")
-    print(f"  Hidden dim: {config['hidden_dim']}, LR: {config['lr']}")
-    print(f"  Iterations: {n_iterations}, Steps/iter: {steps_per_iter}")
-    print(f"  Total steps: {n_iterations * steps_per_iter:,}")
+    print(f"  Physics: {config['description']}")
+    print(f"  Network: hidden_dim={config['hidden_dim']}")
+    print(f"  Learning: lr={config['lr']:.0e}, γ={config['gamma']}, λ={config['gae_lambda']}")
+    print(f"  PPO: clip_ε={config['clip_epsilon']}, entropy={config['entropy_coef']}")
+    print(f"  Training: {n_iterations} iters × {steps_per_iter} steps = {n_iterations * steps_per_iter:,} total")
+    if use_spice:
+        print(f"  SPICE: Validating every {spice_freq} steps (ground truth)")
     print('-'*60)
     
-    # Create environment
-    env = SingleTopologyEnv(surrogate, topology, device=DEVICE)
+    # Create environment with SPICE support
+    env = SingleTopologyEnv(
+        surrogate, topology, device=DEVICE,
+        use_spice=use_spice, spice_freq=spice_freq
+    )
     
-    # Create agent with topology-specific config
+    # Create agent with TOPOLOGY-SPECIFIC hyperparameters
+    # These are physics-informed based on each converter's dynamics
     agent = PPOAgent(
         env,
         hidden_dim=config['hidden_dim'],
         lr=config['lr'],
-        gamma=0.995,
-        gae_lambda=0.97,
-        clip_epsilon=0.15,
-        entropy_coef=0.005,
+        gamma=config['gamma'],              # Topology-specific discount
+        gae_lambda=config['gae_lambda'],    # Topology-specific advantage
+        clip_epsilon=config['clip_epsilon'],# Topology-specific clipping
+        entropy_coef=config['entropy_coef'],# Topology-specific exploration
         value_coef=0.5,
         device=DEVICE,
     )
@@ -226,6 +349,7 @@ def train_single_topology(topology: str, surrogate, quick_mode: bool = False):
         'hidden_dim': config['hidden_dim'],
         'n_iterations': n_iterations,
         'total_steps': n_iterations * steps_per_iter,
+        'spice_enhanced': use_spice,
     }
 
 
@@ -267,13 +391,16 @@ def test_topology_agent(topology: str, surrogate, n_tests: int = 20):
     }
 
 
-def train_all_topologies(quick_mode: bool = False):
+def train_all_topologies(quick_mode: bool = False, use_spice: bool = False, 
+                         spice_freq: int = 10):
     """Train agents for all topologies."""
     
     print("\n" + "="*60)
     print("Per-Topology RL Agent Training")
     print("="*60)
     print(f"Mode: {'Quick (reduced iterations)' if quick_mode else 'Full'}")
+    if use_spice:
+        print(f"SPICE: Enabled (validation every {spice_freq} steps)")
     print(f"Topologies: {', '.join(TOPOLOGIES)}")
     
     # Load surrogate
@@ -284,7 +411,10 @@ def train_all_topologies(quick_mode: bool = False):
     # Train each topology
     results = {}
     for topology in TOPOLOGIES:
-        result = train_single_topology(topology, surrogate, quick_mode)
+        result = train_single_topology(
+            topology, surrogate, quick_mode,
+            use_spice=use_spice, spice_freq=spice_freq
+        )
         results[topology] = result
         print(f"  ✓ {topology}: Best MSE = {result['best_mse']:.2f}")
     
@@ -323,13 +453,17 @@ def train_all_topologies(quick_mode: bool = False):
 if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description='Train RL agents for DC-DC converter topologies')
     parser.add_argument('--quick', action='store_true', 
                         help='Quick mode with reduced iterations')
     parser.add_argument('--topology', type=str, default=None,
                         help='Train only a specific topology')
     parser.add_argument('--test-only', action='store_true',
                         help='Only test existing agents')
+    parser.add_argument('--spice', action='store_true',
+                        help='Enable SPICE-based ground truth validation (slower but more accurate)')
+    parser.add_argument('--spice-freq', type=int, default=10,
+                        help='Validate with SPICE every N steps (default: 10)')
     args = parser.parse_args()
     
     if args.test_only:
@@ -340,7 +474,14 @@ if __name__ == '__main__':
                 print(f"{topo:12s}: MSE = {result['mean_mse']:7.1f} ± {result['std_mse']:6.1f}")
     elif args.topology:
         surrogate = load_trained_model(device=DEVICE)
-        train_single_topology(args.topology, surrogate, args.quick)
+        train_single_topology(
+            args.topology, surrogate, args.quick,
+            use_spice=args.spice, spice_freq=args.spice_freq
+        )
         test_topology_agent(args.topology, surrogate)
     else:
-        train_all_topologies(quick_mode=args.quick)
+        train_all_topologies(
+            quick_mode=args.quick, 
+            use_spice=args.spice, 
+            spice_freq=args.spice_freq
+        )

@@ -208,6 +208,7 @@ wrdata {output_file} abs(v(output))
 """,
 
     Topology.FLYBACK: """* Flyback Converter Validation
+* Proper flyback with transformer isolation
 .param Lp_val={L}
 .param n={n_ratio}
 .param C_val={C}
@@ -217,27 +218,34 @@ wrdata {output_file} abs(v(output))
 .param duty={duty}
 
 Vin input 0 DC {{V_val}}
-Vctrl ctrl 0 PULSE(0 1 0 1n 1n {{duty/freq}} {{1/freq}})
+* Switch control - inverted for flyback operation
+Vctrl ctrl 0 PULSE(1 0 0 1n 1n {{duty/freq}} {{1/freq}})
 
+* Primary side switch
 .model sw_model sw vt=0.5 vh=0.1 ron=0.01 roff=1e6
-S1 input pri_top ctrl 0 sw_model
-Lpri pri_top 0 {{Lp_val}} ic=0
+S1 input sw_node ctrl 0 sw_model
 
-Lsec sec_top 0 {{Lp_val*n*n}} ic=0
-K1 Lpri Lsec 0.98
+* Primary inductor 
+Lpri sw_node 0 {{Lp_val}} ic=0
 
-D1 0 sec_top dmodel
-.model dmodel d is=1e-14 n=1.05
+* Secondary side (isolated)
+* Secondary inductance = Lpri * n^2, inverted polarity for flyback
+Lsec 0 sec_node {{Lp_val*n*n}} ic=0
+K1 Lpri Lsec 0.95
 
-C1 sec_top output {{C_val}} ic=10
+* Output diode - conducts when switch is OFF
+D1 sec_node output dmodel
+.model dmodel d is=1e-14 n=1.05 rs=0.01
+
+* Output filter
+C1 output 0 {{C_val}} ic={{V_val*n*duty/(1-duty+0.01)}}
 Rload output 0 {{R_val}}
-Rref output 0 1e9
 
-.tran 1u 10m 5m uic
+.tran 1u 15m 10m uic
 .control
 run
 set filetype=ascii
-wrdata {output_file} v(sec_top)
+wrdata {output_file} v(output)
 .endc
 .end
 """,

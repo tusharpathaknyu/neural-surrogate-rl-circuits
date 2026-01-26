@@ -117,6 +117,17 @@ TOPOLOGIES = {
         "pros": ["Isolation", "Multiple outputs possible", "Wide ratio range"],
         "cons": ["EMI challenges", "Transformer design", "More complex"],
     },
+    "QR Flyback (Soft-Switching)": {
+        "id": 6,
+        "formula": "Vout = Vin × N × D/(1-D) [variable freq]",
+        "description": "Quasi-Resonant flyback with ZVS/ZCS for reduced EMI and losses.",
+        "use_cases": "High-efficiency chargers, PD/QC adapters, LED drivers, low-EMI apps",
+        "vin_range": (12, 400),
+        "vout_range": (3, 48),
+        "efficiency_typical": "88-94%",
+        "pros": ["Soft switching (ZVS/ZCS)", "Low EMI", "High efficiency", "Reduced thermal stress"],
+        "cons": ["Variable frequency", "Complex control", "Resonant component sizing", "Higher cost"],
+    },
 }
 
 # ============================================================================

@@ -1,13 +1,14 @@
 """
 Extended Multi-topology SPICE data generation.
 
-Supports 6 topologies:
+Supports 7 topologies:
 - Buck: Step-down (Vout < Vin)
 - Boost: Step-up (Vout > Vin)  
 - Buck-Boost: Inverted output, can step up or down
 - SEPIC: Non-inverting, can step up or down
 - Ćuk: Inverting, can step up or down  
 - Flyback: Isolated, transformer-based
+- QR Flyback: Quasi-Resonant Flyback with soft-switching (ZVS/ZCS)
 
 Generates 5000 samples per topology for robust training.
 """
@@ -32,6 +33,7 @@ class Topology(Enum):
     SEPIC = 3
     CUK = 4
     FLYBACK = 5
+    QR_FLYBACK = 6
 
 
 TOPOLOGY_NAMES = {
@@ -41,6 +43,7 @@ TOPOLOGY_NAMES = {
     Topology.SEPIC: "SEPIC (Non-Inverting)",
     Topology.CUK: "Ćuk (Inverting)",
     Topology.FLYBACK: "Flyback (Isolated)",
+    Topology.QR_FLYBACK: "QR Flyback (Soft-Switching)",
 }
 
 TOPOLOGY_DESCRIPTIONS = {
@@ -50,6 +53,7 @@ TOPOLOGY_DESCRIPTIONS = {
     Topology.SEPIC: "Like buck-boost but non-inverting. Vout = Vin × D/(1-D)",
     Topology.CUK: "Continuous input/output current. Vout = -Vin × D/(1-D)",
     Topology.FLYBACK: "Galvanic isolation, flexible ratios. Vout = Vin × N × D/(1-D)",
+    Topology.QR_FLYBACK: "Soft-switching flyback with ZVS/ZCS, low EMI, high efficiency",
 }
 
 
@@ -111,6 +115,17 @@ PARAM_RANGES = {
         'V_in': (12, 400),  # Wide range: 12V to mains-rectified
         'f_sw': (50e3, 150e3),
         'duty': (0.2, 0.5),  # Limited for flyback
+    },
+    Topology.QR_FLYBACK: {
+        # Quasi-Resonant Flyback with soft-switching
+        # Lower switching frequency range due to variable frequency operation
+        'L_pri': (100e-6, 1000e-6),  # Primary (magnetizing) inductance
+        'n_ratio': (0.1, 2.0),  # Turns ratio N2/N1
+        'C': (100e-6, 1000e-6),  # Output capacitor
+        'R_load': (5, 100),
+        'V_in': (12, 400),  # Wide range: 12V to mains-rectified
+        'f_sw': (30e3, 120e3),  # Lower max freq (resonant timing)
+        'duty': (0.15, 0.45),  # More limited for soft-switching
     },
 }
 
@@ -281,6 +296,7 @@ wrdata {output_file} v(output)
 """
 
 FLYBACK_TEMPLATE = """* Flyback Converter - Isolated
+* Proper flyback with transformer and inverted secondary
 .param Lp_val={L_pri}
 .param n={n_ratio}
 .param C_val={C}
@@ -290,32 +306,86 @@ FLYBACK_TEMPLATE = """* Flyback Converter - Isolated
 .param duty={duty}
 
 Vin input 0 DC {{V_val}}
-Vctrl ctrl 0 PULSE(0 1 0 1n 1n {{duty/freq}} {{1/freq}})
+* Switch control - inverted for flyback operation
+Vctrl ctrl 0 PULSE(1 0 0 1n 1n {{duty/freq}} {{1/freq}})
 
-* Primary side
+* Primary side switch
 .model sw_model sw vt=0.5 vh=0.1 ron=0.01 roff=1e6
-S1 input pri_top ctrl 0 sw_model
-Lpri pri_top 0 {{Lp_val}} ic=0
+S1 input sw_node ctrl 0 sw_model
 
-* Coupled inductor (transformer)
-* Secondary inductance = Lpri * n^2
-Lsec sec_top 0 {{Lp_val*n*n}} ic=0
-K1 Lpri Lsec 0.98
+* Primary inductor 
+Lpri sw_node 0 {{Lp_val}} ic=0
 
-D1 0 sec_top dmodel
-.model dmodel d is=1e-14 n=1.05
+* Secondary side (isolated)
+* Secondary inductance = Lpri * n^2, inverted polarity for flyback
+Lsec 0 sec_node {{Lp_val*n*n}} ic=0
+K1 Lpri Lsec 0.95
 
-C1 sec_top output {{C_val}} ic={{V_val*n*duty/(1-duty)}}
+* Output diode - conducts when switch is OFF
+D1 sec_node output dmodel
+.model dmodel d is=1e-14 n=1.05 rs=0.01
+
+* Output filter
+C1 output 0 {{C_val}} ic={{V_val*n*duty/(1-duty+0.01)}}
 Rload output 0 {{R_val}}
 
-* Ground reference for output
-Rref output 0 1e9
-
-.tran 1u 10m 5m uic
+.tran 1u 15m 10m uic
 .control
 run
 set filetype=ascii
-wrdata {output_file} v(sec_top)
+wrdata {output_file} v(output)
+.endc
+.end
+"""
+
+QR_FLYBACK_TEMPLATE = """* Quasi-Resonant (QR) Flyback Converter
+* Soft-switching with ZVS/ZCS for reduced EMI and switching losses
+* Uses resonant tank (Lr, Cr) for sinusoidal switch transitions
+.param Lp_val={L_pri}
+.param Lr_val={{L_pri*0.05}}
+.param Cr_val={{C*0.01}}
+.param n={n_ratio}
+.param C_val={C}
+.param R_val={R_load}
+.param V_val={V_in}
+.param freq={f_sw}
+.param duty={duty}
+
+Vin input 0 DC {{V_val}}
+
+* Valley-switching control (variable frequency in practice)
+Vctrl ctrl 0 PULSE(1 0 0 1n 1n {{duty/freq}} {{1/freq}})
+
+* Primary side switch
+.model sw_model sw vt=0.5 vh=0.1 ron=0.01 roff=1e6
+S1 input sw_node ctrl 0 sw_model
+
+* Resonant inductor (leakage inductance or discrete)
+Lr sw_node pri_node {{Lr_val}}
+
+* Magnetizing inductance
+Lpri pri_node 0 {{Lp_val}} ic=0
+
+* Secondary side (isolated)
+Lsec 0 sec_node {{Lp_val*n*n}} ic=0
+K1 Lpri Lsec 0.95
+
+* Resonant capacitor across switch for ZVS
+Cr sw_node 0 {{Cr_val}}
+
+* Output diode - conducts when switch is OFF
+D1 sec_node output dmodel
+.model dmodel d is=1e-14 n=1.05 rs=0.01
+
+* Output filter
+C1 output 0 {{C_val}} ic={{V_val*n*duty/(1-duty+0.01)}}
+Rload output 0 {{R_val}}
+
+.tran 0.5u 15m 10m uic
+.control
+run
+set filetype=ascii
+wrdata {output_file} v(output)
 .endc
 .end
 """
@@ -328,6 +398,7 @@ TEMPLATES = {
     Topology.SEPIC: SEPIC_TEMPLATE,
     Topology.CUK: CUK_TEMPLATE,
     Topology.FLYBACK: FLYBACK_TEMPLATE,
+    Topology.QR_FLYBACK: QR_FLYBACK_TEMPLATE,
 }
 
 
@@ -359,7 +430,8 @@ def calculate_expected_vout(topology: Topology, params: Dict[str, float]) -> flo
         return v_in * duty / (1 - duty) if duty < 1 else v_in * 10
     elif topology == Topology.CUK:
         return abs(v_in * duty / (1 - duty)) if duty < 1 else v_in * 10
-    elif topology == Topology.FLYBACK:
+    elif topology in [Topology.FLYBACK, Topology.QR_FLYBACK]:
+        # QR Flyback has same DC transfer function as regular flyback
         return v_in * n * duty / (1 - duty) if duty < 1 else v_in * n * 10
     return v_in
 

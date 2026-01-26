@@ -1,13 +1,14 @@
 """
 Multi-Topology Forward Surrogate.
 
-Supports 6 circuit topologies:
+Supports 7 circuit topologies:
 - Buck converter (step-down)
 - Boost converter (step-up)  
 - Buck-Boost converter (inverted, step-up/down)
 - SEPIC (Single-Ended Primary-Inductor Converter)
 - Ćuk converter (inverted output)
 - Flyback converter (isolated)
+- QR Flyback (Quasi-Resonant Flyback - soft switching)
 
 Architecture matches the trained checkpoint.
 """
@@ -31,7 +32,7 @@ class MultiTopologySurrogate(nn.Module):
     """
     
     PARAM_NAMES = ['L', 'C', 'R_load', 'V_in', 'f_sw', 'duty']
-    TOPOLOGIES = ['buck', 'boost', 'buck_boost', 'sepic', 'cuk', 'flyback']
+    TOPOLOGIES = ['buck', 'boost', 'buck_boost', 'sepic', 'cuk', 'flyback', 'qr_flyback']
     
     # Parameter normalization bounds (extended for all topologies)
     PARAM_BOUNDS = {
@@ -43,7 +44,7 @@ class MultiTopologySurrogate(nn.Module):
         'duty': (0.2, 0.8),
     }
     
-    def __init__(self, num_topologies=6, param_dim=6, waveform_len=512, 
+    def __init__(self, num_topologies=7, param_dim=6, waveform_len=512, 
                  embed_dim=32, hidden_dim=256):
         super().__init__()
         
@@ -404,14 +405,18 @@ def load_trained_model(checkpoint_path: str = None, device: str = 'cpu') -> Mult
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     
-    # Create model
-    model = MultiTopologySurrogate()
+    # Determine num_topologies from checkpoint (handle both 6 and 7)
+    state_dict = checkpoint.get('model_state_dict', checkpoint)
+    if 'topology_embedding.weight' in state_dict:
+        num_topologies = state_dict['topology_embedding.weight'].shape[0]
+    else:
+        num_topologies = 7  # Default to 7 (latest)
+    
+    # Create model with correct topology count
+    model = MultiTopologySurrogate(num_topologies=num_topologies)
     
     # Load state dict
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        model.load_state_dict(checkpoint)
+    model.load_state_dict(state_dict)
     
     model.to(device)
     model.eval()

@@ -1,8 +1,8 @@
 """
 Train Multi-Topology Surrogate on Extended Dataset.
 
-Trains the neural surrogate to predict waveforms for all 6 topologies:
-- Buck, Boost, Buck-Boost, SEPIC, Ćuk, Flyback
+Trains the neural surrogate to predict waveforms for all 7 topologies:
+- Buck, Boost, Buck-Boost, SEPIC, Ćuk, Flyback, QR Flyback
 
 Uses topology embeddings for efficient multi-task learning.
 """
@@ -27,7 +27,7 @@ print(f"Using device: {DEVICE}")
 class MultiTopologySurrogate(nn.Module):
     """Neural surrogate supporting multiple circuit topologies."""
     
-    def __init__(self, num_topologies=6, param_dim=6, waveform_len=512, 
+    def __init__(self, num_topologies=7, param_dim=6, waveform_len=512, 
                  embed_dim=32, hidden_dim=256):
         super().__init__()
         

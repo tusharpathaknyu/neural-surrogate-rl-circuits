@@ -47,6 +47,8 @@ class CircuitDesignEnv:
         device: str = 'cpu',
         target_waveforms: Optional[np.ndarray] = None,
         topology: str = 'buck',
+        use_spice_reward: bool = False,
+        spice_validation_freq: int = 10,
     ):
         self.surrogate = surrogate.to(device)
         self.surrogate.eval()
@@ -56,7 +58,13 @@ class CircuitDesignEnv:
         self.device = device
         self.max_steps = max_steps
         self.target_waveforms = target_waveforms
-        self.topology = topology
+        self._topology = topology  # Use private variable
+        
+        # SPICE reward integration
+        self.use_spice_reward = use_spice_reward
+        self.spice_validation_freq = spice_validation_freq
+        self.spice_calculator = None
+        self._init_spice_calculator(topology)
         
         # Check if surrogate is multi-topology
         self.is_multi_topology = hasattr(surrogate, 'topology_embedding')
@@ -66,6 +74,31 @@ class CircuitDesignEnv:
         self.action_dim = self.NUM_PARAMS
         
         # Episode state
+    
+    def _init_spice_calculator(self, topology: str):
+        """Initialize SPICE calculator for a given topology."""
+        if self.use_spice_reward:
+            try:
+                from rl.spice_reward import SPICERewardCalculator
+                self.spice_calculator = SPICERewardCalculator(topology=topology)
+                if not self.spice_calculator.ngspice_available:
+                    print(f"Warning: ngspice not available, disabling SPICE rewards")
+                    self.use_spice_reward = False
+            except ImportError:
+                print("Warning: Could not import SPICERewardCalculator")
+                self.use_spice_reward = False
+    
+    @property
+    def topology(self) -> str:
+        return self._topology
+    
+    @topology.setter
+    def topology(self, value: str):
+        """Update topology and reinitialize SPICE calculator if needed."""
+        if value != self._topology:
+            self._topology = value
+            if self.use_spice_reward:
+                self._init_spice_calculator(value)
         self.current_params = None
         self.target_waveform = None
         self.current_step = 0
@@ -314,6 +347,19 @@ class CircuitDesignEnv:
         # Compute reward using engineering metrics
         reward, info = self._compute_reward(predicted, self.target_waveform)
         
+        # Optionally validate with SPICE for ground-truth reward
+        if self.use_spice_reward and self.spice_calculator is not None:
+            # Use SPICE every N steps (expensive but accurate)
+            if self.current_step % self.spice_validation_freq == 0:
+                spice_reward, spice_info = self._compute_spice_reward()
+                if spice_info.get('spice_used', False):
+                    # Blend surrogate and SPICE rewards (trust SPICE more)
+                    blend_factor = 0.7  # 70% SPICE, 30% surrogate
+                    reward = blend_factor * spice_reward + (1 - blend_factor) * reward
+                    info['spice_reward'] = spice_reward
+                    info['spice_vout'] = spice_info.get('spice_vout', 0)
+                    info['spice_used'] = True
+        
         # Track for improvement bonus
         self.prev_mse = info['mse']
         
@@ -321,6 +367,28 @@ class CircuitDesignEnv:
         done = info['success'] or self.current_step >= self.max_steps
         
         return self._get_state(), reward, done, info
+    
+    def _compute_spice_reward(self) -> Tuple[float, Dict]:
+        """Compute reward using actual SPICE simulation (ground truth)."""
+        if self.spice_calculator is None:
+            return 0.0, {'spice_used': False}
+        
+        # Get the surrogate's prediction for fallback
+        predicted = self._simulate(self.current_params)
+        
+        # Call SPICE reward calculator with current params
+        reward, info = self.spice_calculator.compute_reward(
+            params=self.current_params,
+            target_waveform=self.target_waveform,
+            surrogate_waveform=predicted
+        )
+        
+        # Add spice_used flag
+        info['spice_used'] = info.get('source', 'none') == 'spice'
+        if 'spice_vout' not in info and 'vout' in info:
+            info['spice_vout'] = info['vout']
+        
+        return reward, info
 
 
 if __name__ == '__main__':
