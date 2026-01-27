@@ -3,6 +3,7 @@ Simple RL Environment for Power Electronics Circuit Design.
 No external dependencies - just numpy and torch.
 
 Phase C: The RL agent uses this environment to learn circuit design.
+Updated: Topology-aware reward system for proper handling of inverted/resonant topologies.
 """
 
 import numpy as np
@@ -13,6 +14,14 @@ import sys
 
 sys.path.append(str(Path(__file__).parent.parent))
 from models.forward_surrogate import ForwardSurrogate
+
+# Import topology-aware rewards
+try:
+    from rl.topology_rewards import compute_topology_aware_reward, get_topology_config
+    TOPOLOGY_AWARE_REWARDS = True
+except ImportError:
+    TOPOLOGY_AWARE_REWARDS = False
+    print("⚠️ Topology-aware rewards not available, using standard rewards")
 
 
 class CircuitDesignEnv:
@@ -185,12 +194,19 @@ class CircuitDesignEnv:
         """
         Compute reward based on engineering metrics.
         
-        This is the COMPLEX REWARD FUNCTION from the screenshot:
-        - THD (Total Harmonic Distortion)
-        - Rise Time
-        - Power Efficiency (proxy)
-        - Overshoot penalty
+        Now uses TOPOLOGY-AWARE reward system:
+        - Inverted topologies (Buck-Boost, Cuk): Handle negative voltage correctly
+        - Resonant topologies (QR Flyback): Different THD interpretation
+        - Different efficiency targets per topology
         """
+        
+        # Use topology-aware rewards if available
+        if TOPOLOGY_AWARE_REWARDS:
+            return compute_topology_aware_reward(
+                predicted, target, self.topology, self.prev_mse
+            )
+        
+        # Fallback to standard rewards (legacy)
         info = {}
         
         # 1. MSE - basic waveform matching

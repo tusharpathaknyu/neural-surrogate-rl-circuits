@@ -1,0 +1,80 @@
+============================================================
+🚀 ROBUST SPICE-VALIDATED TRAINING
+============================================================
+Device: cpu
+
+📦 Loading SPICE-validated data...
+   Samples: 35000
+   Train: 31500, Val: 3500
+
+============================================================
+🧠 PHASE 1: TRAINING SURROGATE
+============================================================
+   Parameters: 1,157,731
+   Epoch 10/100: train=31.972891, val=43.716943
+   Epoch 20/100: train=18.915069, val=18.997384
+   Epoch 30/100: train=15.470022, val=14.253826
+   Epoch 40/100: train=13.854729, val=10.295347
+   Epoch 50/100: train=12.811387, val=9.966608
+   Epoch 60/100: train=11.496274, val=15.352427
+   Epoch 70/100: train=11.200493, val=8.710220
+   Epoch 80/100: train=10.403142, val=7.135734
+   Epoch 90/100: train=9.508741, val=9.513518
+   Epoch 100/100: train=9.441126, val=10.352148
+   ✅ Best val loss: 5.982822
+
+============================================================
+🎮 PHASE 2: TRAINING RL AGENTS
+============================================================
+
+   BUCK         
+      Iter 100: reward=-146.3038, best=-100.3088
+      Iter 200: reward=-162.3755, best=-91.1186
+      ✅ Best reward: -91.1186
+
+   BOOST        
+      Iter 100: reward=-6937.3232, best=-742.7248
+      Iter 200: reward=-27154.9883, best=-742.7248
+      ✅ Best reward: -742.7248
+
+   BUCK_BOOST   ⚡INV
+      Iter 100: reward=-85485.7344, best=-986.2150
+      Iter 200: reward=-53447.7109, best=-728.9631
+      ✅ Best reward: -728.9631
+
+   SEPIC        
+      Iter 100: reward=-8717.7725, best=-3319.9062
+      Iter 200: reward=-57915.9922, best=-2422.0066
+      ✅ Best reward: -2422.0066
+
+   CUK          ⚡INV
+      Iter 100: reward=-8858.5088, best=-2739.4106
+      Iter 200: reward=-206471.3906, best=-1394.1042
+      ✅ Best reward: -1394.1042
+
+   FLYBACK      
+      Iter 100: reward=-677845.1250, best=-2550.1089
+      Iter 200: reward=-4792.6216, best=-2550.1089
+      ✅ Best reward: -2550.1089
+
+   QR_FLYBACK   
+      Iter 100: reward=-52881.7734, best=-1996.3044
+      Iter 200: reward=-166820.6562, best=-922.7250
+      ✅ Best reward: -922.7250
+
+============================================================
+📊 PHASE 3: EVALUATION
+============================================================
+   BUCK                Quality: 49.2%
+   BOOST               Quality: 53.7%
+   BUCK_BOOST   (INV)  Quality: 56.5%
+   SEPIC               Quality: 61.7%
+   CUK          (INV)  Quality: 49.5%
+   FLYBACK             Quality: 8.2%
+   QR_FLYBACK          Quality: 14.9%
+
+   📊 Overall Average: 42.0%
+
+============================================================
+✅ TRAINING COMPLETE!
+============================================================
