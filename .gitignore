@@ -37,3 +37,6 @@ checkpoints/*.png
 # Temporary files
 *.tmp
 *.temp
+training_resume.log
+training_intensive.log
+training_full.log
