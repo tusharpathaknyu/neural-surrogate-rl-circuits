@@ -1,0 +1,50 @@
+Using device: cpu
+
+============================================================
+Per-Topology RL Agent Training
+============================================================
+Mode: Full
+SPICE: Enabled (validation every 100 steps)
+Topologies: buck, boost, buck_boost, sepic, cuk, flyback, qr_flyback
+
+Loading multi-topology surrogate...
+Traceback (most recent call last):
+  File "/Users/tushardhananjaypathak/Desktop/MLEntry/rl/train_per_topology_agents.py", line 482, in <module>
+    train_all_topologies(
+    ~~~~~~~~~~~~~~~~~~~~^
+        quick_mode=args.quick,
+        ^^^^^^^^^^^^^^^^^^^^^^
+        use_spice=args.spice,
+        ^^^^^^^^^^^^^^^^^^^^^
+        spice_freq=args.spice_freq
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/tushardhananjaypathak/Desktop/MLEntry/rl/train_per_topology_agents.py", line 407, in train_all_topologies
+    surrogate = load_trained_model(device=DEVICE)
+  File "/Users/tushardhananjaypathak/Desktop/MLEntry/models/multi_topology_surrogate.py", line 419, in load_trained_model
+    model.load_state_dict(state_dict)
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "/opt/homebrew/Caskroom/miniconda/base/lib/python3.13/site-packages/torch/nn/modules/module.py", line 2635, in load_state_dict
+    raise RuntimeError(
+    ...<3 lines>...
+    )
+RuntimeError: Error(s) in loading state_dict for MultiTopologySurrogate:
+	size mismatch for topology_embedding.weight: copying a param with shape torch.Size([7, 64]) from checkpoint, the shape in current model is torch.Size([7, 32]).
+	size mismatch for encoder.0.weight: copying a param with shape torch.Size([512, 70]) from checkpoint, the shape in current model is torch.Size([256, 38]).
+	size mismatch for encoder.0.bias: copying a param with shape torch.Size([512]) from checkpoint, the shape in current model is torch.Size([256]).
+	size mismatch for encoder.1.weight: copying a param with shape torch.Size([512]) from checkpoint, the shape in current model is torch.Size([256]).
+	size mismatch for encoder.1.bias: copying a param with shape torch.Size([512]) from checkpoint, the shape in current model is torch.Size([256]).
+	size mismatch for encoder.4.weight: copying a param with shape torch.Size([512, 512]) from checkpoint, the shape in current model is torch.Size([256, 256]).
+	size mismatch for encoder.4.bias: copying a param with shape torch.Size([512]) from checkpoint, the shape in current model is torch.Size([256]).
+	size mismatch for encoder.5.weight: copying a param with shape torch.Size([512]) from checkpoint, the shape in current model is torch.Size([256]).
+	size mismatch for encoder.5.bias: copying a param with shape torch.Size([512]) from checkpoint, the shape in current model is torch.Size([256]).
+	size mismatch for encoder.8.weight: copying a param with shape torch.Size([512, 512]) from checkpoint, the shape in current model is torch.Size([256, 256]).
+	size mismatch for encoder.8.bias: copying a param with shape torch.Size([512]) from checkpoint, the shape in current model is torch.Size([256]).
+	size mismatch for encoder.9.weight: copying a param with shape torch.Size([512]) from checkpoint, the shape in current model is torch.Size([256]).
+	size mismatch for encoder.9.bias: copying a param with shape torch.Size([512]) from checkpoint, the shape in current model is torch.Size([256]).
+	size mismatch for waveform_head.0.weight: copying a param with shape torch.Size([1024, 512]) from checkpoint, the shape in current model is torch.Size([512, 256]).
+	size mismatch for waveform_head.0.bias: copying a param with shape torch.Size([1024]) from checkpoint, the shape in current model is torch.Size([512]).
+	size mismatch for waveform_head.2.weight: copying a param with shape torch.Size([32, 1024]) from checkpoint, the shape in current model is torch.Size([512, 512]).
+	size mismatch for waveform_head.2.bias: copying a param with shape torch.Size([32]) from checkpoint, the shape in current model is torch.Size([512]).
+	size mismatch for metrics_head.0.weight: copying a param with shape torch.Size([64, 512]) from checkpoint, the shape in current model is torch.Size([64, 256]).
