@@ -402,18 +402,25 @@ def load_trained_model(checkpoint_path: str = None, device: str = 'cpu') -> Mult
     if checkpoint_path is None or not Path(checkpoint_path).exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    # Load checkpoint (weights_only=False needed for numpy scalars in older checkpoints)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    # Determine num_topologies from checkpoint (handle both 6 and 7)
+    # Infer model architecture from checkpoint
     state_dict = checkpoint.get('model_state_dict', checkpoint)
-    if 'topology_embedding.weight' in state_dict:
-        num_topologies = state_dict['topology_embedding.weight'].shape[0]
-    else:
-        num_topologies = 7  # Default to 7 (latest)
     
-    # Create model with correct topology count
-    model = MultiTopologySurrogate(num_topologies=num_topologies)
+    # Get dimensions from checkpoint weights
+    num_topologies = state_dict['topology_embedding.weight'].shape[0]
+    embed_dim = state_dict['topology_embedding.weight'].shape[1]
+    hidden_dim = state_dict['encoder.0.weight'].shape[0]  # First encoder layer output
+    waveform_len = state_dict['waveform_head.2.weight'].shape[0]  # Waveform output length
+    
+    # Create model with correct architecture
+    model = MultiTopologySurrogate(
+        num_topologies=num_topologies,
+        embed_dim=embed_dim,
+        hidden_dim=hidden_dim,
+        waveform_len=waveform_len
+    )
     
     # Load state dict
     model.load_state_dict(state_dict)

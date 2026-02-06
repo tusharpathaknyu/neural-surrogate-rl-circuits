@@ -22,13 +22,12 @@ from rl.environment import CircuitDesignEnv
 from rl.ppo_agent import PPOAgent
 
 
-# Device - prioritize CUDA (Colab), then MPS (Mac), then CPU
+# Device - force CPU to avoid MPS synchronization issues on Mac
+# MPS can freeze during long training loops
 if torch.cuda.is_available():
     DEVICE = 'cuda'
-elif torch.backends.mps.is_available():
-    DEVICE = 'mps'
 else:
-    DEVICE = 'cpu'
+    DEVICE = 'cpu'  # Skip MPS - causes hangs on long training
 print(f"Using device: {DEVICE}")
 
 # All topologies (7 total, including QR Flyback)
