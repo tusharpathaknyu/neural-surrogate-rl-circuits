@@ -1,62 +1,29 @@
 {
-  "timestamp": "2026-01-31T11:14:38.429633",
+  "timestamp": "2026-02-07T12:57:22.193523",
   "completed": [
-    "buck",
-    "boost",
-    "buck_boost",
-    "sepic",
-    "cuk"
+    "flyback",
+    "qr_flyback"
   ],
   "results": {
-    "buck": {
-      "topology": "buck",
-      "best_reward": -421805995.4814093,
-      "best_mse": 12.966310949426052,
-      "total_steps": 614400,
-      "training_time_sec": 10071.546355009079,
-      "training_time_str": "167.9 min",
-      "spice_validations": 60,
-      "spice_calls": 123900
+    "flyback": {
+      "topology": "flyback",
+      "best_reward": -7914046642.116965,
+      "best_mse": 80.34582325047496,
+      "total_steps": 2457600,
+      "training_time_sec": 289140.3154399395,
+      "training_time_str": "4819.0 min",
+      "spice_validations": 120,
+      "spice_calls": 493726
     },
-    "boost": {
-      "topology": "boost",
-      "best_reward": -8398221768.297427,
-      "best_mse": 148.7863303789806,
-      "total_steps": 2048000,
-      "training_time_sec": 110316.54566907883,
-      "training_time_str": "1838.6 min",
-      "spice_validations": 100,
-      "spice_calls": 411500
-    },
-    "buck_boost": {
-      "topology": "buck_boost",
-      "best_reward": -3247832176.1929626,
-      "best_mse": 42.97460093950498,
-      "total_steps": 819200,
-      "training_time_sec": 31979.775608778,
-      "training_time_str": "533.0 min",
-      "spice_validations": 80,
-      "spice_calls": 165200
-    },
-    "sepic": {
-      "topology": "sepic",
-      "best_reward": -18292.433270528185,
-      "best_mse": 59.578514099121094,
-      "total_steps": 2048000,
-      "training_time_sec": 100062.30275774002,
-      "training_time_str": "1667.7 min",
-      "spice_validations": 100,
-      "spice_calls": 411498
-    },
-    "cuk": {
-      "topology": "cuk",
-      "best_reward": -9352823350.408125,
-      "best_mse": 61.08648180677587,
-      "total_steps": 819200,
-      "training_time_sec": 78677.0055360794,
-      "training_time_str": "1311.3 min",
-      "spice_validations": 80,
-      "spice_calls": 165200
+    "qr_flyback": {
+      "topology": "qr_flyback",
+      "best_reward": -427216469.77380633,
+      "best_mse": 195.7474365234375,
+      "total_steps": 2867200,
+      "training_time_sec": 9494.875675201416,
+      "training_time_str": "158.2 min",
+      "spice_validations": 140,
+      "spice_calls": 0
     }
   }
 }
