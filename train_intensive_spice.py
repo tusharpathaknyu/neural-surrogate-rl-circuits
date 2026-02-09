@@ -33,8 +33,8 @@ from rl.topology_rewards import compute_topology_aware_reward, TOPOLOGY_REWARD_C
 DEVICE = 'cpu'
 print(f"Using device: {DEVICE} (forced for stability)")
 
-# Resume from flyback (buck, boost, buck_boost, sepic, cuk already done)
-TOPOLOGIES = ['flyback', 'qr_flyback']
+# Retrain qr_flyback with fixed SPICE template
+TOPOLOGIES = ['qr_flyback']
 
 # ============================================================================
 # PHYSICS-INFORMED HYPERPARAMETERS (from original 18-hour training)

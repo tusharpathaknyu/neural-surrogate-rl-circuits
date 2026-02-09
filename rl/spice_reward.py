@@ -219,8 +219,8 @@ wrdata {output_file} v(output)
         'qr_flyback': """* Quasi-Resonant (QR) Flyback Converter
 * Soft-switching with ZVS/ZCS for reduced EMI and losses
 .param Lp_val={L}
-.param Lr_val={{L*0.05}}
-.param Cr_val={{C*0.01}}
+.param Lr_val={Lr}
+.param Cr_val={Cr}
 .param n=1.0
 .param C_val={C}
 .param R_val={R_load}
@@ -329,6 +329,11 @@ wrdata {output_file} v(output)
             'f_sw': params[4],
             'duty': params[5],
         }
+        
+        # Pre-compute derived parameters for QR flyback
+        if self.topology == 'qr_flyback':
+            param_dict['Lr'] = params[0] * 0.05   # Resonant inductor = 5% of Lp
+            param_dict['Cr'] = params[1] * 0.01   # Resonant capacitor = 1% of C
         
         # Create temp files
         output_file = tempfile.mktemp(suffix='.txt')
