@@ -310,14 +310,20 @@ class TopologySpecificEnv(CircuitDesignEnv):
                     
                     # 2. Surrogate-SPICE agreement: how trustworthy is the surrogate here?
                     spice_surr_mse = float(np.mean((spice_resampled - predicted) ** 2))
-                    agreement = 1.0 / (1.0 + spice_surr_mse / 10.0)
+                    agreement = 1.0 / (1.0 + spice_surr_mse / 5.0)
                     # agreement ≈ 1.0 when they agree, drops toward 0 when they disagree
+                    # Using /5.0 (not /10.0) for harsher penalization of disagreement
                     
-                    # 3. SPICE DC accuracy: does the real circuit produce the right voltage?
+                    # 3. SPICE DC accuracy: BONUS when close, PENALTY when far
                     spice_dc = float(np.mean(spice_resampled))
                     target_dc = float(np.mean(self.target_waveform))
                     dc_error_pct = abs(spice_dc - target_dc) / (abs(target_dc) + 1e-6)
-                    dc_bonus = max(0.0, 2.0 * (1.0 - dc_error_pct))  # 0-2 bonus
+                    if dc_error_pct < 0.5:
+                        # Good DC match: up to +3 bonus
+                        dc_term = 3.0 * (1.0 - 2.0 * dc_error_pct)
+                    else:
+                        # Bad DC match: up to -5 penalty (capped)
+                        dc_term = -min(5.0, 2.0 * (dc_error_pct - 0.5))
                     
                     # 4. Waveform quality bonus from HIGH-RES SPICE data
                     spice_bonus, spice_metrics = self.spice_calculator.compute_spice_quality_bonus(
@@ -325,8 +331,8 @@ class TopologySpecificEnv(CircuitDesignEnv):
                     )
                     
                     # 5. Final reward: surrogate reward modulated by SPICE trust
-                    #    + DC accuracy bonus + waveform quality bonus
-                    reward = reward * agreement + dc_bonus + spice_bonus
+                    #    + DC accuracy term + waveform quality bonus
+                    reward = reward * agreement + dc_term + spice_bonus
                     
                     # Record SPICE metrics for logging
                     spice_target_mse = float(np.mean((spice_resampled - self.target_waveform) ** 2))
@@ -336,7 +342,7 @@ class TopologySpecificEnv(CircuitDesignEnv):
                     info['agreement'] = agreement
                     info['dc_error_pct'] = dc_error_pct * 100
                     info['spice_bonus'] = spice_bonus
-                    info['dc_bonus'] = dc_bonus
+                    info['dc_term'] = dc_term
                     info['spice_v_out'] = spice_metrics['v_out_mean']
                     info['spice_ripple_pct'] = spice_metrics['ripple_pct']
                     info['spice_overshoot_pct'] = spice_metrics['overshoot_pct']
