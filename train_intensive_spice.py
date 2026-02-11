@@ -467,6 +467,12 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
                 if dc_errors:
                     postfix['dc_err%'] = f'{np.mean(dc_errors):.1f}'
                 pbar.set_postfix(postfix)
+                
+                # Print SPICE results as a separate line so they don't get lost in tqdm
+                agree_str = f", agree={np.mean(agreements):.2f}" if agreements else ""
+                dc_str = f", dc_err={np.mean(dc_errors):.1f}%" if dc_errors else ""
+                ripple_str = f", ripple={np.mean(spice_ripples):.1f}%" if spice_ripples else ""
+                print(f"\n  SPICE[iter {iteration+1}]: mse={spice_mse:.1f}{agree_str}{dc_str}{ripple_str}")
         
         # Logging and checkpointing
         log_freq = max(1, config['n_iterations'] // 20)
