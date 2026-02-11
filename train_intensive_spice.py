@@ -272,37 +272,57 @@ class TopologySpecificEnv(CircuitDesignEnv):
             self.step_count % self.spice_validation_freq == 0
         )
         
+        # Always start with surrogate-based reward (fast, always available)
+        reward, info = compute_topology_aware_reward(
+            predicted, self.target_waveform,
+            self.topology, self.prev_mse
+        )
+        info['spice_validated'] = False
+        
+        # On SPICE steps: run full SPICE simulation and add waveform quality bonus
         if use_spice_this_step:
             try:
-                spice_waveform = self._run_spice_simulation()
+                # Get FULL-RESOLUTION SPICE waveform (thousands of points)
+                spice_waveform = self.spice_calculator.simulate(self.current_params)
+                
                 if spice_waveform is not None:
-                    # Use SPICE ground truth for reward
-                    reward, info = compute_topology_aware_reward(
-                        spice_waveform, self.target_waveform,
-                        self.topology, self.prev_mse
+                    # 1. Compute waveform quality metrics from HIGH-RES SPICE output
+                    #    This captures ripple, THD, overshoot, ringing — things the
+                    #    32-point surrogate cannot see.
+                    spice_bonus, spice_metrics = self.spice_calculator.compute_spice_quality_bonus(
+                        spice_waveform, self.current_params, self.topology
                     )
+                    
+                    # 2. Also compute MSE between SPICE waveform and target
+                    #    Resample SPICE to target length for direct comparison
+                    spice_resampled = self.spice_calculator.resample_to_target(
+                        spice_waveform, len(self.target_waveform)
+                    )
+                    spice_mse = float(np.mean((spice_resampled - self.target_waveform) ** 2))
+                    
+                    # 3. Blend into reward:
+                    #    - SPICE waveform quality bonus (ripple, overshoot, THD, ringing)
+                    #    - Surrogate-SPICE agreement bonus (if they agree, surrogate is trustworthy)
+                    surrogate_mse = info['mse']
+                    agreement = 1.0 - min(1.0, abs(surrogate_mse - spice_mse) / (surrogate_mse + 1e-6))
+                    agreement_bonus = agreement * 0.5  # small bonus for surrogate accuracy
+                    
+                    reward += spice_bonus + agreement_bonus
+                    
+                    # Record SPICE metrics in info
                     info['spice_validated'] = True
+                    info['spice_mse'] = spice_mse
+                    info['spice_bonus'] = spice_bonus
+                    info['spice_agreement'] = agreement
+                    info['spice_v_out'] = spice_metrics['v_out_mean']
+                    info['spice_ripple_pct'] = spice_metrics['ripple_pct']
+                    info['spice_overshoot_pct'] = spice_metrics['overshoot_pct']
+                    info['spice_thd'] = spice_metrics['thd']
+                    
                     self.spice_call_count += 1
-                    self.spice_mse_history.append(info['mse'])
-                else:
-                    reward, info = compute_topology_aware_reward(
-                        predicted, self.target_waveform,
-                        self.topology, self.prev_mse
-                    )
-                    info['spice_validated'] = False
+                    self.spice_mse_history.append(spice_mse)
             except Exception as e:
-                reward, info = compute_topology_aware_reward(
-                    predicted, self.target_waveform,
-                    self.topology, self.prev_mse
-                )
-                info['spice_validated'] = False
-        else:
-            # Normal surrogate-based reward with topology awareness
-            reward, info = compute_topology_aware_reward(
-                predicted, self.target_waveform,
-                self.topology, self.prev_mse
-            )
-            info['spice_validated'] = False
+                pass  # Silently fall back to surrogate-only reward
         
         # Update state
         self.prev_mse = info['mse']
@@ -311,26 +331,6 @@ class TopologySpecificEnv(CircuitDesignEnv):
         done = (self.current_step >= self.max_steps) or (info['mse'] < 5.0)
         
         return self._get_state(), reward, done, info
-    
-    def _run_spice_simulation(self):
-        """Run actual SPICE simulation."""
-        if self.spice_calculator is None:
-            return None
-        
-        try:
-            # Pass numpy array directly (not dict)
-            waveform = self.spice_calculator.simulate(self.current_params)
-            
-            # Resample to match target length
-            if waveform is not None and len(waveform) != len(self.target_waveform):
-                indices = np.linspace(0, len(waveform)-1, len(self.target_waveform)).astype(int)
-                waveform = waveform[indices]
-            
-            return waveform
-            
-        except Exception as e:
-            print(f"SPICE error: {e}")
-            return None
 
 
 def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
@@ -395,6 +395,8 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
             
             # Test with multiple SPICE runs
             spice_mses = []
+            spice_ripples = []
+            spice_overshoots = []
             for _ in range(5):
                 state = env.reset()
                 for step in range(20):
@@ -404,16 +406,23 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
                     action_np = action.cpu().numpy().squeeze()
                     state, _, done, info = env.step(action_np)
                     if info.get('spice_validated', False):
-                        spice_mses.append(info['mse'])
+                        spice_mses.append(info.get('spice_mse', info['mse']))
+                        if 'spice_ripple_pct' in info:
+                            spice_ripples.append(info['spice_ripple_pct'])
+                        if 'spice_overshoot_pct' in info:
+                            spice_overshoots.append(info['spice_overshoot_pct'])
                     if done:
                         break
             
             if spice_mses:
                 spice_mse = np.mean(spice_mses)
-                pbar.set_postfix({
+                postfix = {
                     'spice_mse': f'{spice_mse:.1f}',
                     'best': f'{best_mse:.1f}'
-                })
+                }
+                if spice_ripples:
+                    postfix['ripple%'] = f'{np.mean(spice_ripples):.1f}'
+                pbar.set_postfix(postfix)
         
         # Logging and checkpointing
         log_freq = max(1, config['n_iterations'] // 20)
@@ -462,7 +471,14 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
     }
     
     print(f"\n  ✓ {topology}: Best MSE = {best_mse:.2f}, Time = {elapsed/60:.1f} min")
-    print(f"    SPICE calls: {env.spice_call_count}")
+    spice_stats = env.spice_calculator.get_stats() if env.spice_calculator else {}
+    print(f"    SPICE: {env.spice_call_count} calls, "
+          f"success_rate={spice_stats.get('success_rate', 0):.0%}, "
+          f"cache_hits={spice_stats.get('hit_count', 0)}")
+    if env.spice_mse_history:
+        print(f"    SPICE MSE: first={env.spice_mse_history[0]:.1f}, "
+              f"last={env.spice_mse_history[-1]:.1f}, "
+              f"best={min(env.spice_mse_history):.1f}")
     
     return result
 
