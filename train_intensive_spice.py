@@ -236,6 +236,11 @@ class TopologySpecificEnv(CircuitDesignEnv):
         self.prev_mse = None
         self.step_count = 0
         
+        # 10% of episodes get SPICE validation (efficient sampling)
+        # This keeps ~20 SPICE calls per rollout instead of ~100+
+        import random
+        self.spice_this_episode = (random.random() < 0.10)
+        
         return self._get_state()
     
     def step(self, action: np.ndarray):
@@ -264,14 +269,15 @@ class TopologySpecificEnv(CircuitDesignEnv):
         # Simulate with surrogate
         predicted = self._simulate(self.current_params)
         
-        # SPICE validation: fire on FIRST step (critical for short episodes that
-        # terminate early at MSE<5) and then every N steps for longer episodes.
-        # Without step 1, SPICE never fires because episodes end too quickly.
+        # SPICE validation: only on randomly-sampled episodes (10%) at step 1.
+        # This balances SPICE ground-truth feedback with training speed.
+        # ~20 SPICE calls per rollout instead of ~100+ (step 1 of every episode).
         self.step_count += 1
         use_spice_this_step = (
             self.use_spice_reward and 
             self.spice_calculator is not None and
-            (self.step_count == 1 or self.step_count % self.spice_validation_freq == 0)
+            self.spice_this_episode and
+            self.step_count == 1
         )
         
         # SPICE as a TRUST SIGNAL (agreement-based reward modulation)
@@ -425,36 +431,61 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
         if len(agent.episode_mses) > 0:
             all_mses.extend(agent.episode_mses[-10:])
         
-        # SPICE validation iteration
-        if (iteration + 1) % config['spice_freq'] == 0:
+        # SPICE validation iteration: directly evaluate agent's output with SPICE
+        # (bypasses the short-episode problem where env.step() terminates too quickly)
+        if (iteration + 1) % config['spice_freq'] == 0 and env.spice_calculator is not None:
             spice_validations += 1
             
-            # Test with multiple SPICE runs
             spice_mses = []
             spice_ripples = []
-            spice_overshoots = []
-            agreements = []
             dc_errors = []
+            agreements = []
+            
             for _ in range(5):
+                # Run agent for a full episode to get final params
                 state = env.reset()
+                # Force no SPICE during this evaluation rollout (speed)
+                env.spice_this_episode = False
                 for step in range(20):
                     state_t = torch.FloatTensor(state).unsqueeze(0).to(DEVICE)
                     with torch.no_grad():
                         action, _, _ = agent.policy.get_action(state_t, deterministic=True)
                     action_np = action.cpu().numpy().squeeze()
-                    state, _, done, info = env.step(action_np)
-                    if info.get('spice_validated', False):
-                        spice_mses.append(info.get('spice_mse', info['mse']))
-                        if 'spice_ripple_pct' in info:
-                            spice_ripples.append(info['spice_ripple_pct'])
-                        if 'spice_overshoot_pct' in info:
-                            spice_overshoots.append(info['spice_overshoot_pct'])
-                        if 'agreement' in info:
-                            agreements.append(info['agreement'])
-                        if 'dc_error_pct' in info:
-                            dc_errors.append(info['dc_error_pct'])
+                    state, _, done, _ = env.step(action_np)
                     if done:
                         break
+                
+                # Now directly evaluate agent's final params with SPICE
+                try:
+                    spice_wf = env.spice_calculator.simulate(env.current_params)
+                    if spice_wf is not None:
+                        spice_resampled = env.spice_calculator.resample_to_target(
+                            spice_wf, len(env.target_waveform)
+                        )
+                        predicted = env._simulate(env.current_params)
+                        
+                        # SPICE-target MSE (monitoring)
+                        spice_mse = float(np.mean((spice_resampled - env.target_waveform) ** 2))
+                        spice_mses.append(spice_mse)
+                        
+                        # Surrogate-SPICE agreement
+                        spice_surr_mse = float(np.mean((spice_resampled - predicted) ** 2))
+                        agreement = 1.0 / (1.0 + spice_surr_mse / 5.0)
+                        agreements.append(agreement)
+                        
+                        # DC accuracy
+                        spice_dc = float(np.mean(spice_resampled))
+                        target_dc = float(np.mean(env.target_waveform))
+                        dc_err = abs(spice_dc - target_dc) / (abs(target_dc) + 1e-6) * 100
+                        dc_errors.append(dc_err)
+                        
+                        # Waveform quality
+                        _, spice_metrics = env.spice_calculator.compute_spice_quality_bonus(
+                            spice_wf, env.current_params, env.topology
+                        )
+                        spice_ripples.append(spice_metrics['ripple_pct'])
+                except Exception:
+                    pass
             
             if spice_mses:
                 spice_mse = np.mean(spice_mses)
@@ -470,7 +501,7 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
                     postfix['dc_err%'] = f'{np.mean(dc_errors):.1f}'
                 pbar.set_postfix(postfix)
                 
-                # Print SPICE results as a separate line so they don't get lost in tqdm
+                # Print persistently (tqdm overwrites postfix)
                 agree_str = f", agree={np.mean(agreements):.2f}" if agreements else ""
                 dc_str = f", dc_err={np.mean(dc_errors):.1f}%" if dc_errors else ""
                 ripple_str = f", ripple={np.mean(spice_ripples):.1f}%" if spice_ripples else ""
