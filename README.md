@@ -36,23 +36,80 @@ With the fast surrogate in place, we train a reinforcement learning agent that l
 5. The agent gets a reward based on how close its waveform is to the target
 6. Over millions of turns, it learns which parameter changes improve the waveform
 
-**What the agent sees (state, 41 dimensions):**
-- Features extracted from the target waveform (what we want) -- 32 values capturing shape, frequency content, and segment-level detail
-- The current circuit parameter values (normalized) -- 6 values
-- Error signals (current MSE, progress through episode, previous MSE) -- 3 values
+### RL Policy Details
 
-**What the agent does (action, 6 dimensions):**
-- Outputs a small adjustment to each circuit parameter: inductor (L), capacitor (C), load resistance (R), input voltage (V_in), switching frequency (f_sw), and duty cycle (D)
-- Each adjustment is bounded to +/-20% of the parameter's range per step
-- Parameters that span large ranges (L, C, f_sw) are adjusted on a log scale so the agent can make fine adjustments at any order of magnitude
+#### State Space (41 dimensions)
 
-**How it learns (PPO -- Proximal Policy Optimization):**
-- The agent's brain is an actor-critic neural network written from scratch in PyTorch (no external RL libraries)
-- The "actor" decides what adjustments to make (outputs a Gaussian distribution over actions)
-- The "critic" estimates how good the current state is (used to compute advantages)
-- Both share a backbone network, then split into separate heads
-- PPO's clipped objective prevents the policy from changing too drastically in a single update, which stabilizes training
-- Each topology gets its own hyperparameters -- harder topologies (flyback, QR flyback) use larger networks, lower learning rates, and more exploration
+The state is a concatenation of three signal groups:
+
+| Group | Dims | Content |
+|-------|------|---------|
+| Target waveform features | 32 | 5 statistical (mean, std, min, max, peak-to-peak) + 15 FFT magnitudes + 12 segment means |
+| Normalized parameters | 6 | Current [L, C, R_load, V_in, f_sw, duty] mapped to [0, 1] -- log-scale for L, C, f_sw; linear for the rest |
+| Error signals | 3 | Current MSE, step fraction (t / T_max), previous MSE |
+
+#### Action Space (6 continuous dimensions)
+
+$$a = [\Delta L, \; \Delta C, \; \Delta R_{load}, \; \Delta V_{in}, \; \Delta f_{sw}, \; \Delta D] \in [-1, 1]^6$$
+
+Actions are **relative adjustments** (not absolute values). Each is applied with a **max 20% change per step**:
+
+- **L, C, f_sw** -- adjusted in **log-space** (these span orders of magnitude, e.g. 10uH to 100uH)
+- **R_load, V_in, duty** -- adjusted **linearly**, then clipped to physical bounds
+
+#### Network Architecture (ActorCritic)
+
+```
+State (41-dim)
+    |
+    v
+[Shared Backbone]
+  Linear(41, H) -> LayerNorm -> ReLU -> Linear(H, H) -> LayerNorm -> ReLU
+    |                                           |
+    v                                           v
+[Actor Head]                              [Critic Head]
+  Linear(H, H/2) -> ReLU                   Linear(H, H/2) -> ReLU
+  Linear(H/2, 6) -> Tanh                   Linear(H/2, 1)
+  -> action mean (mu)                       -> state value V(s)
+  + learnable log(sigma) per dim
+```
+
+Hidden dim H varies per topology (e.g. 256 for simple topologies, **512** for qr_flyback).
+
+#### Action Sampling
+
+At each step, the policy samples from a diagonal Gaussian:
+
+$$a \sim \mathcal{N}(\mu(s), \; \text{diag}(\sigma^2))$$
+
+where $\mu(s)$ is the actor output and $\sigma = e^{\log \sigma}$ are the learnable per-dimension standard deviations. At inference time, $a = \mu(s)$ deterministically.
+
+#### PPO Training Objective
+
+The policy is updated using PPO's clipped surrogate objective:
+
+$$\mathcal{L} = \underbrace{-\min\!\left(r_t \hat{A}_t, \; \text{clip}(r_t, \, 1 \pm \epsilon) \, \hat{A}_t\right)}_{\text{policy loss}} + \underbrace{0.5 \cdot \text{MSE}(V(s), \, G_t)}_{\text{value loss}} + \underbrace{c_{\text{ent}} \cdot (-H[\pi])}_{\text{entropy regularization}}$$
+
+where $r_t = \frac{\pi_\theta(a_t | s_t)}{\pi_{\theta_{\text{old}}}(a_t | s_t)}$ is the importance sampling ratio, $\hat{A}_t$ are GAE advantages (normalized to zero mean, unit variance), and gradients are clipped at max norm 0.5.
+
+No external RL libraries -- pure PyTorch implementation.
+
+#### Topology-Specific Hyperparameters
+
+Harder topologies get larger networks, lower learning rates, and more exploration:
+
+| Hyperparameter | Typical (Buck) | QR Flyback |
+|----------------|---------------|------------|
+| Hidden dim H | 256 | **512** |
+| Learning rate | 3e-4 | **5e-5** (very low -- sensitive dynamics) |
+| Clip epsilon | 0.20 | **0.10** (tighter -- careful updates) |
+| Entropy coeff | 0.01 | **0.03** (more exploration) |
+| Gamma | 0.99 | **0.998** (long-horizon for resonant transients) |
+| GAE lambda | 0.95 | **0.98** |
+| Steps/iter | 2,048 | **4,096** (larger batches for stability) |
+| Mini-batch | 64 | 64 |
+| Epochs/update | 10 | 10 |
+| Grad clip | 0.5 | 0.5 |
 
 ### Step 3: Ground It in Reality (SPICE-in-the-Loop)
 
@@ -66,6 +123,8 @@ The surrogate is fast but imperfect. To prevent the agent from exploiting surrog
 ### The Reward Function
 
 The agent doesn't just minimize prediction error. The reward captures what a power electronics engineer actually cares about:
+
+$$R = -w_1 \cdot \text{MSE} - w_2 \cdot \text{THD} - w_3 \cdot \text{RiseErr} - w_4 \cdot \text{RippleErr} - w_5 \cdot \text{Overshoot} - w_6 \cdot \text{DC\_Err} + \text{bonuses}$$
 
 | Metric | What it measures | Why it matters |
 |--------|-----------------|----------------|
