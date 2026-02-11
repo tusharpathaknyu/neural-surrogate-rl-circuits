@@ -111,7 +111,17 @@ class MultiTopologySurrogate(nn.Module):
 
 
 def load_extended_dataset(data_dir: Path):
-    """Load the extended multi-topology dataset."""
+    """Load the extended multi-topology dataset.
+    
+    NORMALIZATION FIX (v2):
+    - Old: per-sample waveform normalization (wf / max(abs(wf)))
+      This destroyed voltage magnitude info — the model couldn't learn that
+      buck outputs 6V vs boost outputs 24V. It only learned waveform shapes.
+      
+    - New: per-topology global normalization
+      Compute mean/std per topology → model learns actual voltage ranges.
+      Save normalization stats with checkpoint for proper denormalization.
+    """
     print(f"\nLoading dataset from {data_dir}...")
     
     data = np.load(data_dir / 'combined_dataset.npz')
@@ -134,22 +144,40 @@ def load_extended_dataset(data_dir: Path):
         params_norm[:, i] = np.log10(col)
     
     # Normalize to [-1, 1] range
+    param_stats = {}
     for i in range(params_norm.shape[1]):
         col = params_norm[:, i]
         col_min, col_max = col.min(), col.max()
+        param_stats[i] = {'min': float(col_min), 'max': float(col_max)}
         if col_max > col_min:
             params_norm[:, i] = 2 * (col - col_min) / (col_max - col_min) - 1
     
-    # Normalize waveforms
-    waveform_max = np.abs(waveforms).max(axis=1, keepdims=True)
-    waveform_max = np.where(waveform_max > 0, waveform_max, 1)
-    waveforms_norm = waveforms / waveform_max
+    # Per-TOPOLOGY normalization for waveforms (preserves magnitude info across topologies)
+    num_topologies = len(np.unique(topologies))
+    waveform_stats = {}
+    waveforms_norm = waveforms.copy()
+    
+    for topo_id in range(num_topologies):
+        mask = topologies == topo_id
+        topo_waveforms = waveforms[mask]
+        topo_mean = topo_waveforms.mean()
+        topo_std = topo_waveforms.std()
+        if topo_std < 1e-6:
+            topo_std = 1.0
+        
+        waveforms_norm[mask] = (topo_waveforms - topo_mean) / topo_std
+        waveform_stats[topo_id] = {
+            'mean': float(topo_mean),
+            'std': float(topo_std),
+        }
+        print(f"  Topo {topo_id}: wf_mean={topo_mean:.3f}V, wf_std={topo_std:.3f}V")
     
     return (
         torch.FloatTensor(params_norm),
         torch.FloatTensor(waveforms_norm),
         torch.LongTensor(topologies),
-        waveform_max.squeeze(),
+        waveform_stats,
+        param_stats,
     )
 
 
@@ -158,7 +186,7 @@ def train_model(epochs=100, batch_size=128, lr=1e-3):
     
     # Load data
     data_dir = Path('data/extended_topologies')
-    params, waveforms, topologies, waveform_scales = load_extended_dataset(data_dir)
+    params, waveforms, topologies, waveform_stats, param_stats = load_extended_dataset(data_dir)
     
     # Train/val split
     n = len(params)
@@ -257,6 +285,8 @@ def train_model(epochs=100, batch_size=128, lr=1e-3):
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss,
+                'waveform_stats': waveform_stats,
+                'param_stats': param_stats,
             }, checkpoint_dir / 'multi_topology_surrogate.pt')
             
             print(f"  ✓ Saved best model (val_loss = {val_loss:.6f})")

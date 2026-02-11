@@ -147,10 +147,19 @@ class MultiTopologySurrogate(nn.Module):
                               params: torch.Tensor,
                               topology) -> torch.Tensor:
         """
-        Denormalize waveform from [-1, 1] to actual voltage.
+        Denormalize waveform from model output to actual voltage.
         
-        Uses physics-based scaling: the mean of the denormalized waveform
-        should match the theoretical output voltage for the topology.
+        FIXED (v2): Uses per-topology normalization stats stored in checkpoint.
+        
+        Old approach REPLACED the model's learned output with theoretical DC
+        values + 5% synthetic ripple — the model's actual prediction was
+        completely thrown away. This made every topology output exactly the
+        theoretical formula (V_in*D for buck, etc.), hiding the fact that
+        the model hadn't learned anything useful for complex topologies.
+        
+        New approach: Reverse the per-topology (mean, std) normalization
+        used during training. If stats aren't available (old checkpoint),
+        fall back to theoretical scaling as before.
         
         Args:
             waveform: Normalized waveform from model output
@@ -160,25 +169,26 @@ class MultiTopologySurrogate(nn.Module):
         Returns:
             Waveform scaled to actual voltage values
         """
-        # Extract V_in and duty from params (assuming non-normalized)
+        topo_id = self.get_topology_id(topology)
+        
+        # Use stored per-topology stats if available (new checkpoints)
+        if hasattr(self, '_waveform_stats') and self._waveform_stats is not None:
+            stats = self._waveform_stats.get(topo_id, self._waveform_stats.get(str(topo_id)))
+            if stats is not None:
+                mean = stats['mean']
+                std = stats['std']
+                return waveform * std + mean
+        
+        # Fallback for old checkpoints: use theoretical scaling
+        # (This is the old buggy approach — kept only for backward compat)
         v_in = params[:, 3]  # V_in is at index 3
         duty = params[:, 5]  # duty is at index 5
-        
-        # Compute theoretical output voltage
         v_out_theoretical = self.compute_theoretical_vout(v_in, duty, topology)
-        
-        # The model outputs in [-1, 1] range with mean around 0
-        # We need to shift and scale to match expected voltage
         waveform_mean = waveform.mean(dim=-1, keepdim=True)
         waveform_centered = waveform - waveform_mean
-        
-        # Add typical ripple amplitude (5% of Vout)
         ripple_scale = 0.05 * v_out_theoretical.unsqueeze(-1)
-        
-        # Scale centered waveform and add DC offset
         v_out_theoretical = v_out_theoretical.unsqueeze(-1)
         denorm_waveform = v_out_theoretical + waveform_centered * ripple_scale
-        
         return denorm_waveform
     
     def normalize_params(self, params: torch.Tensor) -> torch.Tensor:
@@ -424,6 +434,14 @@ def load_trained_model(checkpoint_path: str = None, device: str = 'cpu') -> Mult
     
     # Load state dict
     model.load_state_dict(state_dict)
+    
+    # Load normalization stats if available (needed for denormalization)
+    waveform_stats = checkpoint.get('waveform_stats', None)
+    model._waveform_stats = waveform_stats
+    if waveform_stats:
+        print(f"  Loaded per-topology waveform normalization stats")
+    else:
+        print(f"  Warning: No waveform stats in checkpoint, using theoretical denorm (legacy)")
     
     model.to(device)
     model.eval()

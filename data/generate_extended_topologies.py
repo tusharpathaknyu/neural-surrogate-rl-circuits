@@ -590,12 +590,59 @@ def generate_dataset(output_dir: Path = Path('data/extended_topologies')):
     combined_topologies = []
     combined_metadata = []
     
+    # CRITICAL FIX: Map all topology params to the canonical 6-param format
+    # that the surrogate model expects: [L, C, R_load, V_in, f_sw, duty]
+    #
+    # Previous bug: used `list(params.values())[:6]` which silently dropped
+    # f_sw and duty for SEPIC/CUK (8 params), and duty for Flyback/QR_Flyback
+    # (7 params). The surrogate literally couldn't learn without the duty cycle.
+    
+    def map_to_canonical_params(sample_params: Dict[str, float], topology: Topology) -> list:
+        """Map any topology's params to [L, C, R_load, V_in, f_sw, duty]."""
+        if topology in [Topology.BUCK, Topology.BOOST, Topology.BUCK_BOOST]:
+            # Already in canonical order
+            return [
+                sample_params['L'],
+                sample_params['C'],
+                sample_params['R_load'],
+                sample_params['V_in'],
+                sample_params['f_sw'],
+                sample_params['duty'],
+            ]
+        elif topology in [Topology.SEPIC, Topology.CUK]:
+            # Has L1, L2, C_couple, C_out — map L1→L, C_out→C
+            return [
+                sample_params['L1'],       # Primary inductor → L
+                sample_params['C_out'],    # Output cap → C
+                sample_params['R_load'],
+                sample_params['V_in'],
+                sample_params['f_sw'],
+                sample_params['duty'],
+            ]
+        elif topology in [Topology.FLYBACK, Topology.QR_FLYBACK]:
+            # Has L_pri, n_ratio — map L_pri→L
+            return [
+                sample_params['L_pri'],    # Primary inductance → L
+                sample_params['C'],        # Output cap → C
+                sample_params['R_load'],
+                sample_params['V_in'],
+                sample_params['f_sw'],
+                sample_params['duty'],
+            ]
+        else:
+            # Fallback: take what we can
+            return [
+                sample_params.get('L', sample_params.get('L1', 50e-6)),
+                sample_params.get('C', sample_params.get('C_out', 100e-6)),
+                sample_params.get('R_load', 10.0),
+                sample_params.get('V_in', 12.0),
+                sample_params.get('f_sw', 100e3),
+                sample_params.get('duty', 0.5),
+            ]
+    
     for topology in Topology:
         for sample in all_samples[topology.name]:
-            # Normalize params to 6 values (pad if needed)
-            param_values = list(sample.params.values())[:6]
-            while len(param_values) < 6:
-                param_values.append(0.0)
+            param_values = map_to_canonical_params(sample.params, topology)
             
             combined_params.append(param_values)
             combined_waveforms.append(sample.waveform)

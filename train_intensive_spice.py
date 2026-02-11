@@ -280,25 +280,25 @@ class TopologySpecificEnv(CircuitDesignEnv):
             self.step_count == 1
         )
         
-        # SPICE as a TRUST SIGNAL (agreement-based reward modulation)
+        # SPICE as a TRUST SIGNAL (DC-error-based agreement)
         #
-        # Problem: target waveforms come from the surrogate. SPICE waveforms live
-        # in a different domain (ripple, switching noise, transients). Comparing
-        # SPICE output to surrogate targets via raw MSE is apples-to-oranges —
-        # even perfect parameters give high MSE due to domain mismatch.
+        # ROOT CAUSE FIX (v5): Previous versions used waveform MSE between
+        # SPICE and surrogate outputs for "agreement". This is fundamentally
+        # broken because:
+        #   1. Surrogate's predict_voltage() replaces model output with
+        #      theoretical DC (V_in*D for buck, etc.) + 5% synthetic ripple
+        #   2. SPICE produces REAL waveforms with losses, parasitic ringing,
+        #      actual ripple at switching frequency
+        #   3. Even PERFECT params give high waveform MSE due to domain gap
+        #   4. Waveform MSE was 50-2000+ for all topologies — meaningless
         #
-        # Previous fixes tried: (1) additive bonus → reward hacking, (2) SPICE
-        # replaces surrogate → domain mismatch causes MSE to diverge anyway.
+        # FIX: Use DC VOLTAGE ERROR as the agreement metric.
+        # DC voltage is domain-invariant — both SPICE and surrogate can
+        # express DC level accurately. This is also the actual engineering
+        # metric that matters for power converter design.
         #
-        # Correct approach: AGREEMENT-BASED reward modulation.
-        # - Always compute reward from surrogate (same domain as target)
-        # - On SPICE steps, measure how much surrogate and SPICE AGREE
-        # - If they agree → surrogate is trustworthy here → keep full reward
-        # - If they disagree → agent is in a surrogate-inaccurate region → crush reward
-        # - Also reward SPICE DC accuracy and waveform quality
-        #
-        # This pushes the agent toward regions where the surrogate is accurate,
-        # which are the only regions where low surrogate-MSE is meaningful.
+        # agreement = 1 / (1 + dc_error_pct)  where dc_error_pct is %-error
+        # between SPICE DC output and surrogate DC prediction.
         
         # 1. Always compute surrogate-based reward (same domain as target)
         reward, info = compute_topology_aware_reward(
@@ -316,39 +316,44 @@ class TopologySpecificEnv(CircuitDesignEnv):
                         spice_waveform, len(self.target_waveform)
                     )
                     
-                    # 2. Surrogate-SPICE agreement: how trustworthy is the surrogate here?
-                    spice_surr_mse = float(np.mean((spice_resampled - predicted) ** 2))
-                    agreement = 1.0 / (1.0 + spice_surr_mse / 5.0)
-                    # agreement ≈ 1.0 when they agree, drops toward 0 when they disagree
-                    # Using /5.0 (not /10.0) for harsher penalization of disagreement
-                    
-                    # 3. SPICE DC accuracy: BONUS when close, PENALTY when far
+                    # 2. DC-based agreement (domain-invariant)
                     spice_dc = float(np.mean(spice_resampled))
+                    surrogate_dc = float(np.mean(predicted))
                     target_dc = float(np.mean(self.target_waveform))
-                    dc_error_pct = abs(spice_dc - target_dc) / (abs(target_dc) + 1e-6)
-                    if dc_error_pct < 0.5:
+                    
+                    # How well do SPICE and surrogate agree on DC voltage?
+                    dc_agreement_err = abs(spice_dc - surrogate_dc) / (abs(surrogate_dc) + 1e-6)
+                    agreement = 1.0 / (1.0 + dc_agreement_err * 5.0)
+                    # agreement ≈ 1.0 when DCs match, drops toward 0 when they diverge
+                    # *5.0 makes it sensitive: 20% DC gap → agreement ≈ 0.5
+                    
+                    # 3. SPICE DC accuracy vs target: how close is SPICE to what we want?
+                    spice_dc_error_pct = abs(spice_dc - target_dc) / (abs(target_dc) + 1e-6)
+                    if spice_dc_error_pct < 0.3:
                         # Good DC match: up to +3 bonus
-                        dc_term = 3.0 * (1.0 - 2.0 * dc_error_pct)
+                        dc_term = 3.0 * (1.0 - spice_dc_error_pct / 0.3)
+                    elif spice_dc_error_pct < 0.5:
+                        # Mediocre: no bonus, no penalty
+                        dc_term = 0.0
                     else:
-                        # Bad DC match: up to -5 penalty (capped)
-                        dc_term = -min(5.0, 2.0 * (dc_error_pct - 0.5))
+                        # Bad DC match: penalty
+                        dc_term = -min(5.0, 2.0 * (spice_dc_error_pct - 0.5))
                     
                     # 4. Waveform quality bonus from HIGH-RES SPICE data
                     spice_bonus, spice_metrics = self.spice_calculator.compute_spice_quality_bonus(
                         spice_waveform, self.current_params, self.topology
                     )
                     
-                    # 5. Final reward: surrogate reward modulated by SPICE trust
+                    # 5. Final reward: surrogate reward modulated by DC agreement
                     #    + DC accuracy term + waveform quality bonus
                     reward = reward * agreement + dc_term + spice_bonus
                     
-                    # Record SPICE metrics for logging
-                    spice_target_mse = float(np.mean((spice_resampled - self.target_waveform) ** 2))
+                    # Record metrics for logging (use DC error % as primary metric)
                     info['spice_validated'] = True
-                    info['spice_mse'] = spice_target_mse  # For monitoring
-                    info['spice_surr_mse'] = spice_surr_mse
+                    info['spice_dc'] = spice_dc
+                    info['surrogate_dc'] = surrogate_dc
+                    info['spice_dc_err_pct'] = spice_dc_error_pct * 100
                     info['agreement'] = agreement
-                    info['dc_error_pct'] = dc_error_pct * 100
                     info['spice_bonus'] = spice_bonus
                     info['dc_term'] = dc_term
                     info['spice_v_out'] = spice_metrics['v_out_mean']
@@ -358,7 +363,7 @@ class TopologySpecificEnv(CircuitDesignEnv):
                     info['surrogate_mse'] = info['mse']
                     
                     self.spice_call_count += 1
-                    self.spice_mse_history.append(spice_target_mse)
+                    self.spice_mse_history.append(spice_dc_error_pct * 100)  # Track DC error %
                     spice_succeeded = True
             except Exception as e:
                 self.spice_fail_count = getattr(self, 'spice_fail_count', 0) + 1
@@ -464,20 +469,23 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
                         )
                         predicted = env._simulate(env.current_params)
                         
-                        # SPICE-target MSE (monitoring)
+                        # DC-based metrics (domain-invariant)
+                        spice_dc = float(np.mean(spice_resampled))
+                        surrogate_dc = float(np.mean(predicted))
+                        target_dc = float(np.mean(env.target_waveform))
+                        
+                        # SPICE DC error vs target (the metric that matters)
+                        dc_err = abs(spice_dc - target_dc) / (abs(target_dc) + 1e-6) * 100
+                        dc_errors.append(dc_err)
+                        
+                        # Also track old MSE for comparison during transition
                         spice_mse = float(np.mean((spice_resampled - env.target_waveform) ** 2))
                         spice_mses.append(spice_mse)
                         
-                        # Surrogate-SPICE agreement
-                        spice_surr_mse = float(np.mean((spice_resampled - predicted) ** 2))
-                        agreement = 1.0 / (1.0 + spice_surr_mse / 5.0)
+                        # DC-based agreement (how well surrogate & SPICE agree)
+                        dc_agreement_err = abs(spice_dc - surrogate_dc) / (abs(surrogate_dc) + 1e-6)
+                        agreement = 1.0 / (1.0 + dc_agreement_err * 5.0)
                         agreements.append(agreement)
-                        
-                        # DC accuracy
-                        spice_dc = float(np.mean(spice_resampled))
-                        target_dc = float(np.mean(env.target_waveform))
-                        dc_err = abs(spice_dc - target_dc) / (abs(target_dc) + 1e-6) * 100
-                        dc_errors.append(dc_err)
                         
                         # Waveform quality
                         _, spice_metrics = env.spice_calculator.compute_spice_quality_bonus(
@@ -487,25 +495,26 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
                 except Exception:
                     pass
             
-            if spice_mses:
-                spice_mse = np.mean(spice_mses)
+            if dc_errors:
+                avg_dc_err = np.mean(dc_errors)
                 postfix = {
-                    'spice_mse': f'{spice_mse:.1f}',
+                    'dc_err%': f'{avg_dc_err:.1f}',
                     'best': f'{best_mse:.1f}'
                 }
                 if spice_ripples:
                     postfix['ripple%'] = f'{np.mean(spice_ripples):.1f}'
                 if agreements:
                     postfix['agree'] = f'{np.mean(agreements):.2f}'
-                if dc_errors:
-                    postfix['dc_err%'] = f'{np.mean(dc_errors):.1f}'
+                if spice_mses:
+                    postfix['spice_mse'] = f'{np.mean(spice_mses):.1f}'
                 pbar.set_postfix(postfix)
                 
                 # Print persistently (tqdm overwrites postfix)
                 agree_str = f", agree={np.mean(agreements):.2f}" if agreements else ""
-                dc_str = f", dc_err={np.mean(dc_errors):.1f}%" if dc_errors else ""
+                dc_str = f", dc_err={avg_dc_err:.1f}%"
                 ripple_str = f", ripple={np.mean(spice_ripples):.1f}%" if spice_ripples else ""
-                print(f"\n  SPICE[iter {iteration+1}]: mse={spice_mse:.1f}{agree_str}{dc_str}{ripple_str}")
+                mse_str = f", wf_mse={np.mean(spice_mses):.1f}" if spice_mses else ""
+                print(f"\n  SPICE[iter {iteration+1}]{dc_str}{agree_str}{ripple_str}{mse_str}")
         
         # Logging and checkpointing
         log_freq = max(1, config['n_iterations'] // 20)
@@ -559,9 +568,9 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
           f"success_rate={spice_stats.get('success_rate', 0):.0%}, "
           f"cache_hits={spice_stats.get('hit_count', 0)}")
     if env.spice_mse_history:
-        print(f"    SPICE MSE: first={env.spice_mse_history[0]:.1f}, "
-              f"last={env.spice_mse_history[-1]:.1f}, "
-              f"best={min(env.spice_mse_history):.1f}")
+        print(f"    SPICE DC err%: first={env.spice_mse_history[0]:.1f}%, "
+              f"last={env.spice_mse_history[-1]:.1f}%, "
+              f"best={min(env.spice_mse_history):.1f}%")
     
     return result
 
