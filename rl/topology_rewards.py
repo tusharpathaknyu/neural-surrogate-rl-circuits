@@ -159,8 +159,12 @@ def compute_topology_aware_reward(predicted: np.ndarray, target: np.ndarray,
         sign_penalty = 0
     
     # ========== 1. MSE (waveform matching) ==========
+    # BUG FIX: Use log-scaled MSE so it doesn't drown other metrics.
+    # Raw MSE can be 50-200+, while other terms are 0.1-3. Log brings it to ~2-5 range.
     mse = np.mean((pred_for_metrics - target_for_metrics) ** 2)
+    log_mse = np.log1p(mse)  # log(1 + MSE), smooth and bounded
     info['mse'] = mse
+    info['log_mse'] = log_mse
     
     # ========== 2. THD (Total Harmonic Distortion) ==========
     def compute_thd(waveform):
@@ -174,6 +178,7 @@ def compute_topology_aware_reward(predicted: np.ndarray, target: np.ndarray,
     pred_thd = compute_thd(pred_for_metrics)
     target_thd = compute_thd(target_for_metrics)
     thd_error = abs(pred_thd - target_thd)
+    thd_error = min(thd_error, 5.0)  # Cap to prevent reward explosion
     info['thd_error'] = thd_error
     
     # For resonant topologies, THD is expected - don't penalize as much
@@ -194,22 +199,23 @@ def compute_topology_aware_reward(predicted: np.ndarray, target: np.ndarray,
     pred_rise = compute_rise_time(pred_for_metrics)
     target_rise = compute_rise_time(target_for_metrics)
     rise_error = abs(pred_rise - target_rise) / (target_rise + 1e-8)
+    rise_error = min(rise_error, 5.0)  # Cap to prevent reward explosion
     info['rise_error'] = rise_error
     
     # ========== 4. Ripple ==========
     pred_ripple = np.max(pred_for_metrics) - np.min(pred_for_metrics)
     target_ripple = np.max(target_for_metrics) - np.min(target_for_metrics)
     
-    # Normalize by topology's ripple target
-    ripple_target = config['ripple_target']
-    pred_ripple_normalized = pred_ripple / (np.abs(np.mean(pred_for_metrics)) + 1e-8)
-    ripple_error = abs(pred_ripple_normalized - ripple_target) / ripple_target
+    # Compute ripple error as relative difference (clamped to prevent explosion)
+    ripple_error = abs(pred_ripple - target_ripple) / (target_ripple + 1e-2)  # +0.01 to avoid div-by-near-zero
+    ripple_error = min(ripple_error, 5.0)  # Cap at 5 to prevent reward explosion
     info['ripple_error'] = ripple_error
     
     # ========== 5. Overshoot (CRITICAL) ==========
     target_max = np.max(target_for_metrics)
     pred_max = np.max(pred_for_metrics)
     overshoot = max(0, (pred_max - target_max) / (target_max + 1e-8))
+    overshoot = min(overshoot, 5.0)  # Cap
     info['overshoot'] = overshoot
     
     # ========== 6. DC Error ==========
@@ -259,20 +265,24 @@ def compute_topology_aware_reward(predicted: np.ndarray, target: np.ndarray,
     info['improvement'] = improvement
     
     # ========== Success Check ==========
-    # Topology-specific success threshold
+    # BUG FIX: Old threshold 0.001 was ~3000x below best achievable MSE (~3.3).
+    # The +10 success bonus NEVER triggered. Use realistic threshold.
     efficiency_target = config['efficiency_target']
-    success_threshold = 0.001 * (1 / efficiency_target)  # Harder targets for efficient topologies
+    success_threshold = 5.0 * (1 / efficiency_target)  # ~5-6 MSE depending on topology
     success = mse < success_threshold
     info['success'] = success
     
     # ========== TOTAL REWARD ==========
+    # BUG FIX: Use log_mse instead of raw mse to keep reward terms balanced.
+    # Raw MSE (50-200) was drowning all engineering metrics (0.1-3 each).
+    # log1p(MSE) keeps it in ~2-5 range, so THD/ripple/overshoot actually matter.
     reward = (
-        -weights['mse'] * mse +
+        -weights['mse'] * log_mse +
         -weights['thd'] * thd_error +
         -weights['rise'] * rise_error +
         -weights['ripple'] * ripple_error +
         -weights['overshoot'] * overshoot +
-        -weights['dc'] * dc_error +
+        -weights['dc'] * np.log1p(dc_error) +  # Also log-scale DC error
         -sign_penalty +  # Penalty for wrong sign (inverted topologies)
         -ringing_penalty +  # Penalty for ringing (Flyback)
         +smoothness_bonus +  # Bonus for smoothness (Cuk)

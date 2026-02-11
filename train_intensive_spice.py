@@ -33,8 +33,8 @@ from rl.topology_rewards import compute_topology_aware_reward, TOPOLOGY_REWARD_C
 DEVICE = 'cpu'
 print(f"Using device: {DEVICE} (forced for stability)")
 
-# Retrain qr_flyback with fixed SPICE template
-TOPOLOGIES = ['qr_flyback']
+# Full training across all 7 topologies (post-bugfix)
+TOPOLOGIES = ['buck', 'boost', 'buck_boost', 'sepic', 'cuk', 'flyback', 'qr_flyback']
 
 # ============================================================================
 # PHYSICS-INFORMED HYPERPARAMETERS (from original 18-hour training)
@@ -131,11 +131,17 @@ def create_target_waveform(topology: str, v_in: float = 12.0, duty: float = 0.5,
                            output_points: int = 32) -> np.ndarray:
     """Create physics-based target waveform for each topology.
     
+    BUG FIX: Old version created synthetic waveforms with rise times starting at 0,
+    but the surrogate model outputs steady-state waveforms (e.g., buck starts at ~6V).
+    The agent was trying to match an impossible target shape.
+    
+    New approach: Generate steady-state waveforms with realistic ripple,
+    matching the distribution the surrogate actually produces.
+    
     Note: output_points=32 to match surrogate model output shape.
     """
     
     t = np.linspace(0, 0.01, output_points)
-    rise_time = 0.0005
     
     # Calculate expected V_out based on topology transfer function
     if topology == 'buck':
@@ -153,7 +159,6 @@ def create_target_waveform(topology: str, v_in: float = 12.0, duty: float = 0.5,
         v_out = v_in * duty * n / (1 - duty) if duty < 0.95 else v_in * duty * n / 0.05
     elif topology == 'qr_flyback':
         n = 1.0
-        # QR has slightly different effective duty due to resonant period
         eff_duty = duty * 0.95
         v_out = v_in * eff_duty * n / (1 - eff_duty) if eff_duty < 0.95 else v_in * n
     else:
@@ -162,19 +167,18 @@ def create_target_waveform(topology: str, v_in: float = 12.0, duty: float = 0.5,
     # Clip to reasonable range
     v_out = np.clip(v_out, -60, 60)
     
-    # Create waveform with rise time
-    target = np.ones(output_points) * v_out
-    rise_mask = t < rise_time
-    if v_out >= 0:
-        target[rise_mask] = v_out * (1 - np.exp(-t[rise_mask] * 60))
-    else:
-        target[rise_mask] = v_out * (1 - np.exp(-t[rise_mask] * 60))
+    # BUG FIX: Create STEADY-STATE waveform (no synthetic rise time from 0).
+    # The surrogate outputs steady-state waveforms, so targets must match.
+    target = np.ones(output_points, dtype=np.float32) * v_out
     
-    # Add topology-specific ripple
+    # Add topology-specific ripple (this IS realistic - all converters have ripple)
     ripple_config = TOPOLOGY_REWARD_CONFIG.get(topology, {})
     ripple_pct = ripple_config.get('ripple_target', 0.03)
     ripple = ripple_pct * abs(v_out) * np.sin(2 * np.pi * 10 * t)
     target = target + ripple
+    
+    # Add small random noise to make targets slightly varied (prevents overfitting)
+    target += np.random.normal(0, 0.01 * abs(v_out) + 0.01, output_points)
     
     return target.astype(np.float32)
 
@@ -201,7 +205,7 @@ class TopologySpecificEnv(CircuitDesignEnv):
             **kwargs
         )
         self.topology = topology
-        self.topology_idx = TOPOLOGIES.index(topology)
+        self.topology_idx = TOPOLOGIES.index(topology) if topology in TOPOLOGIES else 0
         self.is_multi_topology = True
         
         # Track SPICE metrics
@@ -210,23 +214,23 @@ class TopologySpecificEnv(CircuitDesignEnv):
         self.step_count = 0
         
     def reset(self):
-        """Reset environment with topology-appropriate target."""
-        v_in = np.random.uniform(8, 36)
-        duty = np.random.uniform(0.3, 0.7)
+        """Reset environment with topology-appropriate target.
         
-        self.target_waveform = create_target_waveform(
-            self.topology, v_in=v_in, duty=duty
-        )
+        BUG FIX (v2): Instead of using create_target_waveform() with manual transfer
+        functions, we generate targets by running the SURROGATE on random params.
+        This guarantees target-surrogate alignment for ALL topologies.
         
-        # Random starting parameters
-        self.current_params = np.array([
-            np.random.uniform(*self.PARAM_BOUNDS['L']),
-            np.random.uniform(*self.PARAM_BOUNDS['C']),
-            np.random.uniform(*self.PARAM_BOUNDS['R_load']),
-            v_in,
-            np.random.uniform(*self.PARAM_BOUNDS['f_sw']),
-            duty,
-        ], dtype=np.float32)
+        Old approach had 2 fatal mismatches:
+          - buck_boost/cuk: surrogate outputs positive, target was negative (MSE=4339)
+          - qr_flyback: surrogate uses buck scaling, target used QR formula (MSE=216)
+        """
+        # Generate target by running surrogate with random params
+        # This is what the base env does, and it guarantees alignment
+        target_params = self._random_params()
+        self.target_waveform = self._simulate(target_params)
+        
+        # Random DIFFERENT starting parameters (agent must find the right ones)
+        self.current_params = self._random_params()
         
         self.current_step = 0
         self.prev_mse = None
@@ -239,16 +243,20 @@ class TopologySpecificEnv(CircuitDesignEnv):
         # Apply action (clipped deltas)
         action = np.clip(action, -1, 1)
         
+        # BUG FIX: Was using 0.1 (10%) max change vs base env's 0.2 (20%).
+        # Less exploration = slower convergence. Match base env.
+        max_change_pct = 0.2
+        
         for i, name in enumerate(self.PARAM_NAMES):
             low, high = self.PARAM_BOUNDS[name]
             if name in ['L', 'C', 'f_sw']:
                 log_low, log_high = np.log(low), np.log(high)
                 current_log = np.log(self.current_params[i])
-                delta = action[i] * 0.1 * (log_high - log_low)
+                delta = action[i] * max_change_pct * (log_high - log_low)
                 new_log = np.clip(current_log + delta, log_low, log_high)
                 self.current_params[i] = np.exp(new_log)
             else:
-                delta = action[i] * 0.1 * (high - low)
+                delta = action[i] * max_change_pct * (high - low)
                 self.current_params[i] = np.clip(
                     self.current_params[i] + delta, low, high
                 )
@@ -300,7 +308,7 @@ class TopologySpecificEnv(CircuitDesignEnv):
         self.prev_mse = info['mse']
         self.current_step += 1
         
-        done = (self.current_step >= self.max_steps) or (info['mse'] < 0.1)
+        done = (self.current_step >= self.max_steps) or (info['mse'] < 5.0)
         
         return self._get_state(), reward, done, info
     
@@ -363,6 +371,7 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
     best_reward = float('-inf')
     best_mse = float('inf')
     spice_validations = 0
+    last_hourly_save = time.time()  # Track hourly checkpoint saves
     
     # Progress bar
     pbar = tqdm(range(config['n_iterations']), desc=f"{topology}")
@@ -426,6 +435,15 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
                 'mse': f'{mean_mse:.1f}',
                 'best': f'{best_mse:.1f}'
             })
+        
+        # Hourly checkpoint save (every 3600 seconds)
+        elapsed_since_save = time.time() - last_hourly_save
+        if elapsed_since_save >= 3600:
+            hourly_path = f'checkpoints/rl_agent_{topology}_hourly.pt'
+            agent.save(hourly_path)
+            last_hourly_save = time.time()
+            hours_total = (time.time() - start_time) / 3600
+            print(f'\n  [HOURLY SAVE] {topology} @ iter {iteration+1}/{config["n_iterations"]} ({hours_total:.1f}h elapsed) -> {hourly_path}')
     
     # Final save
     agent.save(f'checkpoints/rl_agent_{topology}.pt')

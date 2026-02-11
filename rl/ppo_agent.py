@@ -177,8 +177,16 @@ class PPOAgent:
             else:
                 state = next_state
         
+        # BUG FIX: Bootstrap last value from critic when episode hasn't ended.
+        # Old code always used next_value=0 at rollout boundary, which is wrong
+        # when the episode is mid-way through (not terminal).
+        last_state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            _, _, last_value = self.policy.get_action(last_state_tensor)
+        last_value = last_value.item()
+        
         # Compute advantages using GAE
-        advantages, returns = self._compute_gae(rewards, values, dones)
+        advantages, returns = self._compute_gae(rewards, values, dones, last_value)
         
         return {
             'states': np.array(states),
@@ -188,18 +196,24 @@ class PPOAgent:
             'advantages': advantages,
         }
     
-    def _compute_gae(self, rewards, values, dones):
-        """Compute Generalized Advantage Estimation."""
+    def _compute_gae(self, rewards, values, dones, last_value=0):
+        """Compute Generalized Advantage Estimation.
+        
+        BUG FIX: last_value now comes from critic's bootstrap estimate
+        instead of always being 0. When rollout ends mid-episode, we need
+        the critic's V(s_next) to properly estimate future returns.
+        """
         advantages = np.zeros(len(rewards))
         last_gae = 0
         
         for t in reversed(range(len(rewards))):
             if t == len(rewards) - 1:
-                next_value = 0
+                next_value = last_value  # Bootstrap from critic (was: always 0)
+                next_non_terminal = 1.0 - dones[t]
             else:
                 next_value = values[t + 1]
+                next_non_terminal = 1.0 - dones[t]
             
-            next_non_terminal = 1.0 - dones[t]
             delta = rewards[t] + self.gamma * next_value * next_non_terminal - values[t]
             advantages[t] = last_gae = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae
         

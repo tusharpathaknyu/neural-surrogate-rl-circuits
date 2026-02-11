@@ -1,24 +1,0 @@
-======================================================================
-🔬 GENERATING TOPOLOGY-SPECIFIC TRAINING DATA
-======================================================================
-
-📊 BUCK (Simple step-down, non-inverted)
-  Generating buck:   0%|          | 0/7000 [00:00<?, ?it/s]  Generating buck:  33%|███▎      | 2306/7000 [00:00<00:00, 23055.40it/s]  Generating buck:  81%|████████  | 5651/7000 [00:00<00:00, 29162.68it/s]  Generating buck: 100%|██████████| 7000/7000 [00:00<00:00, 29224.64it/s]
-
-📊 BOOST (Step-up, non-inverted, DCM common)
-  Generating boost:   0%|          | 0/7000 [00:00<?, ?it/s]  Generating boost:  48%|████▊     | 3343/7000 [00:00<00:00, 33420.95it/s]  Generating boost:  96%|█████████▌| 6702/7000 [00:00<00:00, 33518.19it/s]  Generating boost: 100%|██████████| 7000/7000 [00:00<00:00, 33448.47it/s]
-
-📊 BUCK_BOOST (INVERTED output, can step up or down)
-  Generating buck_boost:   0%|          | 0/7000 [00:00<?, ?it/s]  Generating buck_boost:  54%|█████▍    | 3781/7000 [00:00<00:00, 37806.61it/s]  Generating buck_boost: 100%|██████████| 7000/7000 [00:00<00:00, 37910.16it/s]
-
-📊 SEPIC (Non-inverted buck-boost, coupling capacitor dynamics)
-  Generating sepic:   0%|          | 0/7000 [00:00<?, ?it/s]  Generating sepic:  50%|████▉     | 3496/7000 [00:00<00:00, 34955.12it/s]  Generating sepic: 100%|██████████| 7000/7000 [00:00<00:00, 35058.04it/s]
-
-📊 CUK (INVERTED, two inductors, continuous I/O currents)
-  Generating cuk:   0%|          | 0/7000 [00:00<?, ?it/s]  Generating cuk:  54%|█████▍    | 3789/7000 [00:00<00:00, 37883.53it/s]  Generating cuk: 100%|██████████| 7000/7000 [00:00<00:00, 38008.75it/s]
-
-📊 FLYBACK (Isolated, transformer ringing, DCM typical)
-  Generating flyback:   0%|          | 0/7000 [00:00<?, ?it/s]  Generating flyback:  48%|████▊     | 3368/7000 [00:00<00:00, 33678.35it/s]  Generating flyback:  97%|█████████▋| 6757/7000 [00:00<00:00, 33800.26it/s]  Generating flyback: 100%|██████████| 7000/7000 [00:00<00:00, 33744.52it/s]
-
-📊 QR_FLYBACK (Quasi-resonant, variable freq, ZVS/ZCS)
-  Generating qr_flyback:   0%|          | 0/7000 [00:00<?, ?it/s]  Generating qr_flyback:  47%|████▋     | 3323/7000 [00:00<00:00, 33223.06it/s]  Generating qr_flyback:  95%|█████████▍| 6646/7000 [00:00<00:00, 29829.81it/s]  Generating qr_flyback: 100%|██████████| 7000/7000 [00:00<00:00, 30339.80it/s]

@@ -79,7 +79,8 @@ class CircuitDesignEnv:
         self.is_multi_topology = hasattr(surrogate, 'topology_embedding')
         
         # State and action dimensions
-        self.state_dim = self.NUM_WAVEFORM_FEATURES + self.NUM_PARAMS + 3
+        # State = [target_features(32) + current_pred_features(32) + params(6) + error(3)] = 73
+        self.state_dim = self.NUM_WAVEFORM_FEATURES * 2 + self.NUM_PARAMS + 3
         self.action_dim = self.NUM_PARAMS
         
         # Episode state
@@ -114,15 +115,21 @@ class CircuitDesignEnv:
         self.prev_mse = None
     
     def _normalize_params(self, params: np.ndarray) -> np.ndarray:
-        """Normalize parameters to [0, 1] range."""
+        """Normalize parameters to [0, 1] range.
+        
+        BUG FIX: Clamp values to PARAM_BOUNDS before normalizing.
+        Previously, if V_in exceeded bounds (e.g., 36 with max=24),
+        normalized value would be >1, corrupting policy network inputs.
+        """
         normalized = np.zeros(self.NUM_PARAMS)
         for i, name in enumerate(self.PARAM_NAMES):
             low, high = self.PARAM_BOUNDS[name]
+            val = np.clip(params[i], low, high)  # Ensure within bounds
             if name in ['L', 'C', 'f_sw']:
-                normalized[i] = (np.log(params[i]) - np.log(low)) / (np.log(high) - np.log(low))
+                normalized[i] = (np.log(val) - np.log(low)) / (np.log(high) - np.log(low))
             else:
-                normalized[i] = (params[i] - low) / (high - low)
-        return normalized
+                normalized[i] = (val - low) / (high - low)
+        return np.clip(normalized, 0.0, 1.0)  # Final safety clamp
     
     def _extract_waveform_features(self, waveform: np.ndarray) -> np.ndarray:
         """Extract compact features from waveform for state representation."""
@@ -159,7 +166,7 @@ class CircuitDesignEnv:
             
             if self.is_multi_topology:
                 # Multi-topology model needs topology_ids
-                topology_map = {'buck': 0, 'boost': 1, 'buck_boost': 2, 'sepic': 3, 'cuk': 4, 'flyback': 5}
+                topology_map = {'buck': 0, 'boost': 1, 'buck_boost': 2, 'sepic': 3, 'cuk': 4, 'flyback': 5, 'qr_flyback': 6}
                 topology_id = topology_map.get(self.topology, 0)
                 topology_ids = torch.tensor([topology_id], dtype=torch.long, device=self.device)
                 
@@ -175,20 +182,28 @@ class CircuitDesignEnv:
             return waveform.cpu().numpy().squeeze()
     
     def _get_state(self) -> np.ndarray:
-        """Construct state vector for the agent."""
+        """Construct state vector for the agent.
+        
+        BUG FIX: Now includes BOTH target AND current prediction features,
+        so the agent knows WHERE its prediction differs from target (not just 
+        a scalar MSE). This gives directional gradient information.
+        
+        State = [target_features(32), current_pred_features(32), norm_params(6), error_signals(3)] = 73 dims
+        """
         target_features = self._extract_waveform_features(self.target_waveform)
         norm_params = self._normalize_params(self.current_params)
         
         current_waveform = self._simulate(self.current_params)
+        current_features = self._extract_waveform_features(current_waveform)
         mse = np.mean((current_waveform - self.target_waveform) ** 2)
         
         error_signal = np.array([
-            mse,
+            np.log1p(mse),  # Log-scale MSE to prevent huge values dominating
             self.current_step / self.max_steps,
-            self.prev_mse if self.prev_mse else mse,
+            np.log1p(self.prev_mse) if self.prev_mse else np.log1p(mse),
         ], dtype=np.float32)
         
-        return np.concatenate([target_features, norm_params, error_signal]).astype(np.float32)
+        return np.concatenate([target_features, current_features, norm_params, error_signal]).astype(np.float32)
     
     def _compute_reward(self, predicted: np.ndarray, target: np.ndarray) -> Tuple[float, Dict]:
         """
@@ -209,8 +224,9 @@ class CircuitDesignEnv:
         # Fallback to standard rewards (legacy)
         info = {}
         
-        # 1. MSE - basic waveform matching
+        # 1. MSE - basic waveform matching (log-scaled to prevent dominance)
         mse = np.mean((predicted - target) ** 2)
+        log_mse = np.log1p(mse)
         info['mse'] = mse
         
         # 2. THD comparison
@@ -265,18 +281,18 @@ class CircuitDesignEnv:
             improvement = (self.prev_mse - mse) / (self.prev_mse + 1e-8)
         info['improvement'] = improvement
         
-        # Success check
-        success = mse < 0.001
+        # Success check (BUG FIX: was 0.001, now realistic)
+        success = mse < 5.0
         info['success'] = success
         
-        # TOTAL REWARD - weighted combination
+        # TOTAL REWARD - weighted combination (BUG FIX: use log_mse)
         reward = (
-            -1.0 * mse +              # Match waveform shape
+            -1.0 * log_mse +              # Match waveform shape (log-scaled)
             -0.5 * thd_error +        # Match harmonic content
             -0.3 * rise_error +       # Match rise time
             -0.5 * ripple_error +     # Match ripple
             -2.0 * overshoot +        # Heavy penalty for overshoot
-            -0.5 * dc_error +         # Match DC level
+            -0.5 * np.log1p(dc_error) + # Match DC level (log-scaled)
             1.0 * max(0, improvement) + # Bonus for improving
             10.0 * (1.0 if success else 0)  # Big bonus for success
         )
