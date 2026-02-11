@@ -322,7 +322,7 @@ class TopologySpecificEnv(CircuitDesignEnv):
                     self.spice_call_count += 1
                     self.spice_mse_history.append(spice_mse)
             except Exception as e:
-                pass  # Silently fall back to surrogate-only reward
+                self.spice_fail_count = getattr(self, 'spice_fail_count', 0) + 1
         
         # Update state
         self.prev_mse = info['mse']
