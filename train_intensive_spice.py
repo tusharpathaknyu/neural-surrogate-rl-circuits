@@ -272,60 +272,84 @@ class TopologySpecificEnv(CircuitDesignEnv):
             self.step_count % self.spice_validation_freq == 0
         )
         
-        # On SPICE steps: SPICE is the authority. Recompute reward from SPICE waveform.
-        # On non-SPICE steps: use surrogate as a fast approximation.
+        # SPICE as a TRUST SIGNAL (agreement-based reward modulation)
         #
-        # Previous approach (additive bonus) caused reward hacking: the agent learned
-        # to exploit surrogate inaccuracies, getting low surrogate-MSE but high SPICE-MSE.
-        # Fix: SPICE REPLACES the surrogate reward when available.
+        # Problem: target waveforms come from the surrogate. SPICE waveforms live
+        # in a different domain (ripple, switching noise, transients). Comparing
+        # SPICE output to surrogate targets via raw MSE is apples-to-oranges —
+        # even perfect parameters give high MSE due to domain mismatch.
+        #
+        # Previous fixes tried: (1) additive bonus → reward hacking, (2) SPICE
+        # replaces surrogate → domain mismatch causes MSE to diverge anyway.
+        #
+        # Correct approach: AGREEMENT-BASED reward modulation.
+        # - Always compute reward from surrogate (same domain as target)
+        # - On SPICE steps, measure how much surrogate and SPICE AGREE
+        # - If they agree → surrogate is trustworthy here → keep full reward
+        # - If they disagree → agent is in a surrogate-inaccurate region → crush reward
+        # - Also reward SPICE DC accuracy and waveform quality
+        #
+        # This pushes the agent toward regions where the surrogate is accurate,
+        # which are the only regions where low surrogate-MSE is meaningful.
+        
+        # 1. Always compute surrogate-based reward (same domain as target)
+        reward, info = compute_topology_aware_reward(
+            predicted, self.target_waveform,
+            self.topology, self.prev_mse
+        )
         
         spice_succeeded = False
         if use_spice_this_step:
             try:
-                # Get FULL-RESOLUTION SPICE waveform (thousands of points)
                 spice_waveform = self.spice_calculator.simulate(self.current_params)
                 
                 if spice_waveform is not None:
-                    # 1. Resample SPICE waveform to target length for reward computation
                     spice_resampled = self.spice_calculator.resample_to_target(
                         spice_waveform, len(self.target_waveform)
                     )
                     
-                    # 2. Compute PRIMARY reward from SPICE ground truth (replaces surrogate)
-                    reward, info = compute_topology_aware_reward(
-                        spice_resampled, self.target_waveform,
-                        self.topology, self.prev_mse
-                    )
+                    # 2. Surrogate-SPICE agreement: how trustworthy is the surrogate here?
+                    spice_surr_mse = float(np.mean((spice_resampled - predicted) ** 2))
+                    agreement = 1.0 / (1.0 + spice_surr_mse / 10.0)
+                    # agreement ≈ 1.0 when they agree, drops toward 0 when they disagree
                     
-                    # 3. Add waveform quality bonus from HIGH-RES SPICE data
-                    #    (ripple, THD, overshoot, ringing — invisible at 32 points)
+                    # 3. SPICE DC accuracy: does the real circuit produce the right voltage?
+                    spice_dc = float(np.mean(spice_resampled))
+                    target_dc = float(np.mean(self.target_waveform))
+                    dc_error_pct = abs(spice_dc - target_dc) / (abs(target_dc) + 1e-6)
+                    dc_bonus = max(0.0, 2.0 * (1.0 - dc_error_pct))  # 0-2 bonus
+                    
+                    # 4. Waveform quality bonus from HIGH-RES SPICE data
                     spice_bonus, spice_metrics = self.spice_calculator.compute_spice_quality_bonus(
                         spice_waveform, self.current_params, self.topology
                     )
-                    reward += spice_bonus
                     
-                    # Record SPICE metrics
+                    # 5. Final reward: surrogate reward modulated by SPICE trust
+                    #    + DC accuracy bonus + waveform quality bonus
+                    reward = reward * agreement + dc_bonus + spice_bonus
+                    
+                    # Record SPICE metrics for logging
+                    spice_target_mse = float(np.mean((spice_resampled - self.target_waveform) ** 2))
                     info['spice_validated'] = True
-                    info['spice_mse'] = info['mse']  # This IS the SPICE MSE now
+                    info['spice_mse'] = spice_target_mse  # For monitoring
+                    info['spice_surr_mse'] = spice_surr_mse
+                    info['agreement'] = agreement
+                    info['dc_error_pct'] = dc_error_pct * 100
                     info['spice_bonus'] = spice_bonus
+                    info['dc_bonus'] = dc_bonus
                     info['spice_v_out'] = spice_metrics['v_out_mean']
                     info['spice_ripple_pct'] = spice_metrics['ripple_pct']
                     info['spice_overshoot_pct'] = spice_metrics['overshoot_pct']
                     info['spice_thd'] = spice_metrics['thd']
-                    info['surrogate_mse'] = float(np.mean((predicted - self.target_waveform) ** 2))
+                    info['surrogate_mse'] = info['mse']
                     
                     self.spice_call_count += 1
-                    self.spice_mse_history.append(info['mse'])
+                    self.spice_mse_history.append(spice_target_mse)
                     spice_succeeded = True
             except Exception as e:
                 self.spice_fail_count = getattr(self, 'spice_fail_count', 0) + 1
         
         if not spice_succeeded:
-            # Fallback: surrogate-based reward
-            reward, info = compute_topology_aware_reward(
-                predicted, self.target_waveform,
-                self.topology, self.prev_mse
-            )
             info['spice_validated'] = False
         
         # Update state
@@ -401,6 +425,8 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
             spice_mses = []
             spice_ripples = []
             spice_overshoots = []
+            agreements = []
+            dc_errors = []
             for _ in range(5):
                 state = env.reset()
                 for step in range(20):
@@ -415,6 +441,10 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
                             spice_ripples.append(info['spice_ripple_pct'])
                         if 'spice_overshoot_pct' in info:
                             spice_overshoots.append(info['spice_overshoot_pct'])
+                        if 'agreement' in info:
+                            agreements.append(info['agreement'])
+                        if 'dc_error_pct' in info:
+                            dc_errors.append(info['dc_error_pct'])
                     if done:
                         break
             
@@ -426,6 +456,10 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
                 }
                 if spice_ripples:
                     postfix['ripple%'] = f'{np.mean(spice_ripples):.1f}'
+                if agreements:
+                    postfix['agree'] = f'{np.mean(agreements):.2f}'
+                if dc_errors:
+                    postfix['dc_err%'] = f'{np.mean(dc_errors):.1f}'
                 pbar.set_postfix(postfix)
         
         # Logging and checkpointing
