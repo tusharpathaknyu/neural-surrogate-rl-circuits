@@ -127,6 +127,43 @@ TOPOLOGY_CONFIG = {
 }
 
 
+# Per-topology parameter bounds matching the data generation ranges.
+# CRITICAL: The global PARAM_BOUNDS in environment.py is too wide (V_in 3.3-400V).
+# Without per-topology bounds, the agent wanders into parameter regions where the
+# surrogate has never been trained, causing surrogate exploitation (low surrogate MSE
+# but SPICE MSE oscillating wildly 1600-52000+).
+PER_TOPOLOGY_PARAM_BOUNDS = {
+    'buck': {
+        'L': (10e-6, 100e-6), 'C': (47e-6, 470e-6), 'R_load': (2, 50),
+        'V_in': (8, 48), 'f_sw': (50e3, 500e3), 'duty': (0.1, 0.9),
+    },
+    'boost': {
+        'L': (22e-6, 220e-6), 'C': (100e-6, 1000e-6), 'R_load': (10, 100),
+        'V_in': (3.3, 24), 'f_sw': (50e3, 300e3), 'duty': (0.2, 0.8),
+    },
+    'buck_boost': {
+        'L': (47e-6, 470e-6), 'C': (100e-6, 1000e-6), 'R_load': (5, 50),
+        'V_in': (5, 36), 'f_sw': (50e3, 200e3), 'duty': (0.2, 0.8),
+    },
+    'sepic': {
+        'L': (22e-6, 220e-6), 'C': (100e-6, 1000e-6), 'R_load': (10, 100),
+        'V_in': (5, 24), 'f_sw': (50e3, 200e3), 'duty': (0.2, 0.8),
+    },
+    'cuk': {
+        'L': (47e-6, 470e-6), 'C': (100e-6, 1000e-6), 'R_load': (5, 50),
+        'V_in': (5, 24), 'f_sw': (50e3, 200e3), 'duty': (0.2, 0.8),
+    },
+    'flyback': {
+        'L': (100e-6, 1000e-6), 'C': (100e-6, 1000e-6), 'R_load': (5, 100),
+        'V_in': (12, 400), 'f_sw': (50e3, 150e3), 'duty': (0.2, 0.5),
+    },
+    'qr_flyback': {
+        'L': (100e-6, 1000e-6), 'C': (100e-6, 1000e-6), 'R_load': (5, 100),
+        'V_in': (12, 400), 'f_sw': (30e3, 120e3), 'duty': (0.15, 0.45),
+    },
+}
+
+
 def create_target_waveform(topology: str, v_in: float = 12.0, duty: float = 0.5,
                            output_points: int = 32) -> np.ndarray:
     """Create physics-based target waveform for each topology.
@@ -208,10 +245,21 @@ class TopologySpecificEnv(CircuitDesignEnv):
         self.topology_idx = TOPOLOGIES.index(topology) if topology in TOPOLOGIES else 0
         self.is_multi_topology = True
         
+        # CRITICAL FIX: Override global PARAM_BOUNDS with per-topology bounds.
+        # Without this, agent explores V_in=400V for buck (trained on 8-48V),
+        # causing surrogate exploitation (low surrogate MSE, wild SPICE MSE).
+        if topology in PER_TOPOLOGY_PARAM_BOUNDS:
+            self.PARAM_BOUNDS = PER_TOPOLOGY_PARAM_BOUNDS[topology].copy()
+        
         # Track SPICE metrics
         self.spice_call_count = 0
         self.spice_mse_history = []
         self.step_count = 0
+        
+        # Running SPICE trust score: exponential moving average of agreement.
+        # When SPICE and surrogate disagree, this dampens surrogate reward
+        # even on non-SPICE episodes, preventing exploitation.
+        self.spice_trust = 0.5  # Start neutral
         
         # Training progress for staged thresholds (set externally)
         self.training_progress = 0.0  # 0.0 = start, 1.0 = end
@@ -239,10 +287,10 @@ class TopologySpecificEnv(CircuitDesignEnv):
         self.prev_mse = None
         self.step_count = 0
         
-        # 10% of episodes get SPICE validation (efficient sampling)
-        # This keeps ~20 SPICE calls per rollout instead of ~100+
+        # 20% of episodes get SPICE validation (was 10%: too low,
+        # agent exploited surrogate between sparse SPICE checks)
         import random
-        self.spice_this_episode = (random.random() < 0.10)
+        self.spice_this_episode = (random.random() < 0.20)
         
         return self._get_state()
     
@@ -312,6 +360,12 @@ class TopologySpecificEnv(CircuitDesignEnv):
             self.topology, self.prev_mse
         )
         
+        # Apply SPICE trust dampening to ALL steps (not just SPICE steps).
+        # If recent SPICE checks showed high disagreement, reduce surrogate
+        # reward confidence to prevent exploitation.
+        if not use_spice_this_step:
+            reward = reward * (0.5 + 0.5 * self.spice_trust)
+        
         spice_succeeded = False
         if use_spice_this_step:
             try:
@@ -353,6 +407,12 @@ class TopologySpecificEnv(CircuitDesignEnv):
                     # 5. Final reward: surrogate reward modulated by DC agreement
                     #    + DC accuracy term + waveform quality bonus
                     reward = reward * agreement + dc_term + spice_bonus
+                    
+                    # 6. Update running SPICE trust (EMA, alpha=0.3)
+                    #    When agreement is high, trust increases -> surrogate reward
+                    #    is fully used. When agreement drops, trust drops -> 
+                    #    surrogate reward is dampened even on non-SPICE steps.
+                    self.spice_trust = 0.7 * self.spice_trust + 0.3 * agreement
                     
                     # Record metrics for logging (use DC error % as primary metric)
                     info['spice_validated'] = True
