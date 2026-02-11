@@ -1,95 +1,128 @@
-# Neural Surrogate + RL for Power Electronics Design
+# Neural Surrogate + RL for Power Electronics Circuit Design
 
-A machine learning system that designs DC-DC power converter circuits using neural surrogates and reinforcement learning with SPICE-in-the-loop validation. Covers 7 converter topologies end-to-end: data generation, surrogate training, and per-topology PPO agents grounded by real ngspice simulations.
+An ML system that learns to design DC-DC power converter circuits automatically. Given a desired output voltage waveform, a trained RL agent selects component values (inductor, capacitor, switching frequency, duty cycle, etc.) that produce that waveform -- in seconds instead of hours.
 
-## Problem
+---
 
-Designing power converters requires iterating through component values (inductors, capacitors, switching frequency, duty cycle) and simulating the output waveform each time. A single ngspice simulation takes ~100ms. Optimizing a design can take hours of manual tuning.
+## The Problem
 
-This project replaces that loop:
+Power electronics engineers design circuits by trial and error: pick component values, run a SPICE simulation (~100ms), look at the output waveform, adjust, repeat. For complex topologies this takes hours of manual iteration.
 
-1. A **neural surrogate** (1.16M parameters) predicts circuit waveforms from 6 component parameters in ~0.001ms -- a 100,000x speedup over SPICE.
-2. **PPO agents** use the surrogate to explore millions of parameter combinations, learning to produce target waveforms for each topology.
-3. Periodically, real **ngspice simulations** validate the surrogate's predictions (SPICE-in-the-loop), keeping the agent grounded in physical reality.
+This project automates that entire loop using three components working together:
+
+## How It Works
+
+### Step 1: Build a Fast Simulator (Neural Surrogate)
+
+Real circuit simulation (ngspice) is accurate but slow -- about 100ms per run. To let an RL agent explore millions of designs, we first train a neural network to approximate the simulator.
+
+- **Input**: 6 circuit parameters + which topology (buck, boost, flyback, etc.)
+- **Output**: The predicted output voltage waveform (512 time-points)
+- **Speed**: ~0.001ms per prediction (100,000x faster than SPICE)
+- **Training data**: 5,000+ real ngspice simulations per topology with randomized component values
+
+The surrogate is a shared encoder with topology embeddings and a convolutional waveform decoder (1.16M parameters total). It learns a unified representation across all 7 topologies.
+
+### Step 2: Train an RL Agent to Design Circuits
+
+With the fast surrogate in place, we train a reinforcement learning agent that learns to pick the right component values for any target waveform.
+
+**The setup works like a game:**
+
+1. The agent is shown a target waveform (the voltage shape we want the circuit to produce)
+2. It starts with random component values
+3. Each "turn", it adjusts the 6 circuit parameters by small amounts
+4. After each adjustment, the surrogate instantly predicts what the circuit would output
+5. The agent gets a reward based on how close its waveform is to the target
+6. Over millions of turns, it learns which parameter changes improve the waveform
+
+**What the agent sees (state, 41 dimensions):**
+- Features extracted from the target waveform (what we want) -- 32 values capturing shape, frequency content, and segment-level detail
+- The current circuit parameter values (normalized) -- 6 values
+- Error signals (current MSE, progress through episode, previous MSE) -- 3 values
+
+**What the agent does (action, 6 dimensions):**
+- Outputs a small adjustment to each circuit parameter: inductor (L), capacitor (C), load resistance (R), input voltage (V_in), switching frequency (f_sw), and duty cycle (D)
+- Each adjustment is bounded to +/-20% of the parameter's range per step
+- Parameters that span large ranges (L, C, f_sw) are adjusted on a log scale so the agent can make fine adjustments at any order of magnitude
+
+**How it learns (PPO -- Proximal Policy Optimization):**
+- The agent's brain is an actor-critic neural network written from scratch in PyTorch (no external RL libraries)
+- The "actor" decides what adjustments to make (outputs a Gaussian distribution over actions)
+- The "critic" estimates how good the current state is (used to compute advantages)
+- Both share a backbone network, then split into separate heads
+- PPO's clipped objective prevents the policy from changing too drastically in a single update, which stabilizes training
+- Each topology gets its own hyperparameters -- harder topologies (flyback, QR flyback) use larger networks, lower learning rates, and more exploration
+
+### Step 3: Ground It in Reality (SPICE-in-the-Loop)
+
+The surrogate is fast but imperfect. To prevent the agent from exploiting surrogate errors and learning "tricks" that wouldn't work on a real circuit, we periodically validate with real ngspice simulations:
+
+- Every 5 training iterations, we run the agent's current design through actual ngspice
+- The reward is blended: 70% real SPICE result + 30% surrogate prediction
+- This keeps the agent honest -- it can't learn shortcuts that only fool the neural network
+- Over a full training run, 500K-600K real SPICE simulations are used alongside millions of surrogate calls
+
+### The Reward Function
+
+The agent doesn't just minimize prediction error. The reward captures what a power electronics engineer actually cares about:
+
+| Metric | What it measures | Why it matters |
+|--------|-----------------|----------------|
+| MSE | Overall waveform shape match | Primary learning signal |
+| DC Error | Is the average output voltage correct? | A 12V supply must output 12V, not 11.5V |
+| Overshoot | Does the voltage spike above target? | Can physically damage components in real circuits |
+| Ripple | How much does the voltage wobble? | Too much ripple means noisy power delivery |
+| Rise Time | How fast does the voltage reach its target? | Slow rise = sluggish response to load changes |
+| THD | Total harmonic distortion | Measures unwanted frequency content in the output |
+
+Each topology gets different weights on these metrics. For example:
+- **Inverted topologies** (Buck-Boost, Cuk) get a penalty if the output voltage has the wrong sign
+- **Flyback** gets a separate ringing penalty (high-frequency oscillation from the transformer)
+- **QR Flyback** gets THD penalty reduced by 80% (harmonics are expected in resonant converters) and a bonus for smooth switching transitions
 
 ## Supported Topologies
 
-| Topology | Type | Transfer Function | Agent Status |
-|----------|------|-------------------|--------------|
-| Buck | Step-down | V_out = V_in * D | Trained |
-| Boost | Step-up | V_out = V_in / (1 - D) | Trained |
-| Buck-Boost | Inverting | V_out = -V_in * D / (1 - D) | Trained |
-| SEPIC | Non-inverting | V_out = V_in * D / (1 - D) | Trained |
-| Cuk | Inverting, low ripple | V_out = -V_in * D / (1 - D) | Trained |
-| Flyback | Isolated | V_out = V_in * D * n / (1 - D) | Trained (SPICE-validated, 80 hrs) |
-| QR Flyback | Resonant, soft-switching | Modified duty with resonant period | Training (SPICE-validated) |
+Each topology is a different circuit architecture for converting DC voltage. They differ in complexity, component count, and behavior:
 
-## Architecture
+| Topology | What it does | Transfer Function | Difficulty |
+|----------|-------------|-------------------|------------|
+| Buck | Steps voltage down | V_out = V_in x D | Simplest |
+| Boost | Steps voltage up | V_out = V_in / (1 - D) | Simple |
+| Buck-Boost | Steps up or down, inverts polarity | V_out = -V_in x D / (1 - D) | Medium |
+| SEPIC | Steps up or down, same polarity | V_out = V_in x D / (1 - D) | Medium |
+| Cuk | Steps up or down, inverts, low ripple | V_out = -V_in x D / (1 - D) | Medium |
+| Flyback | Isolated output via transformer | V_out = V_in x D x n / (1 - D) | Hard |
+| QR Flyback | Flyback with resonant soft-switching | Modified duty with resonant tank | Hardest |
 
-```
-                    +-------------------+
-                    |   ngspice (SPICE) |  Ground-truth circuit simulator
-                    |   ~100ms / call   |  Runs as subprocess, CPU-only
-                    +--------+----------+
-                             |
-                             | Validates every 5 iterations
-                             v
-+----------------+    +------+-------+    +---------------------+
-| Target         |    | PPO Agent    |    | Surrogate Model     |
-| Waveform       +--->| (per topo)   +--->| MultiTopologySurr.  |
-| (32 points)    |    | ActorCritic  |    | 1.16M params        |
-+----------------+    | 6-dim action |    | ~0.001ms / call     |
-                      +--------------+    +---------------------+
+D = duty cycle (fraction of time the switch is ON). n = transformer turns ratio.
 
-State:  [32 waveform features | 6 normalized params | 3 error signals] = 41 dims
-Action: [delta_L, delta_C, delta_R, delta_Vin, delta_fsw, delta_duty] in [-1, 1]
-```
+## Circuit Parameters the Agent Controls
 
-### RL Policy (PPO)
+| Parameter | Symbol | Range | Description |
+|-----------|--------|-------|-------------|
+| Inductance | L | 10-100 uH | Energy storage element |
+| Capacitance | C | 47-470 uF | Output voltage smoothing |
+| Load Resistance | R_load | 2-50 Ohm | How much current the load draws |
+| Input Voltage | V_in | 10-24 V | DC source voltage |
+| Switching Frequency | f_sw | 50-500 kHz | How fast the transistor switches |
+| Duty Cycle | D | 20-80% | Fraction of each cycle the switch is ON |
 
-- **Network**: Shared backbone with separate actor and critic heads
-  - Shared: Linear -> LayerNorm -> ReLU -> Linear -> LayerNorm -> ReLU
-  - Actor: Linear -> ReLU -> Linear -> Tanh (outputs action mean) + learnable log-std
-  - Critic: Linear -> ReLU -> Linear (outputs scalar V(s))
-- **Action distribution**: Diagonal Gaussian -- samples from N(mu(s), diag(sigma^2))
-- **Advantages**: Generalized Advantage Estimation (GAE)
-- **Loss**: Clipped surrogate objective + value loss + entropy bonus
-- **No external RL libraries** -- pure PyTorch implementation
+## Training Compute
 
-Topology-specific hyperparameters scale network capacity and exploration for harder topologies (e.g., QR Flyback uses hidden_dim=512, lr=5e-5, clip=0.10, entropy=0.03).
+Each topology trains for hundreds of iterations. Each iteration, the agent collects thousands of environment steps using the fast surrogate, then validates against real ngspice.
 
-### Reward Function
+| Topology | Iterations | Env Steps/Iter | SPICE Calls | Wall Time |
+|----------|-----------|----------------|-------------|-----------|
+| Buck | 300 | 1,024 | ~30K | ~4 hrs |
+| Boost | 400 | 2,048 | ~80K | ~12 hrs |
+| Buck-Boost | 350 | 1,024 | ~35K | ~6 hrs |
+| SEPIC | 400 | 2,048 | ~80K | ~12 hrs |
+| Cuk | 350 | 1,024 | ~35K | ~6 hrs |
+| Flyback | 600 | 2,048 | ~493K | ~80 hrs |
+| QR Flyback | 700 | 4,096 | ~576K+ | ~70+ hrs |
 
-Topology-aware, multi-objective reward combining engineering metrics:
-
-- **MSE**: Waveform shape matching (primary signal)
-- **THD**: Total harmonic distortion error
-- **Rise time**: 10-90% rise time matching
-- **Ripple**: Output voltage ripple error
-- **Overshoot**: Heavy penalty (can damage components in real circuits)
-- **DC error**: Mean voltage accuracy
-- **Topology-specific terms**: Sign penalty (inverted topologies), ringing penalty (flyback), transition smoothness bonus (QR flyback, rewards ZVS behavior), smoothness bonus (Cuk)
-
-### Surrogate Model
-
-- **Architecture**: MultiTopologySurrogate -- topology embedding + shared encoder + waveform decoder with conv refinement
-- **Parameters**: 1,157,731
-- **Input**: 6 circuit parameters + topology ID
-- **Output**: 512-point voltage waveform (compressed to 32 for RL state)
-- **Training data**: 5000+ ngspice simulations per topology with randomized component values
-
-## Circuit Parameters
-
-| Parameter | Range | Scale | Description |
-|-----------|-------|-------|-------------|
-| L | 10-100 uH | Log | Inductor |
-| C | 47-470 uF | Log | Capacitor |
-| R_load | 2-50 Ohm | Linear | Load resistance |
-| V_in | 10-24 V | Linear | Input voltage |
-| f_sw | 50-500 kHz | Log | Switching frequency |
-| duty | 20-80% | Linear | Duty cycle |
-
-The agent adjusts these 6 parameters each step (max 20% relative change), with log-scale adjustments for L, C, and f_sw to handle their wide dynamic range.
+**Total: 200+ hours of training, 1M+ real SPICE simulations across all topologies.** All training ran on a MacBook Air (M3, CPU-only). SPICE simulation is CPU-bound and dominates the wall time.
 
 ## Project Structure
 
@@ -97,18 +130,18 @@ The agent adjusts these 6 parameters each step (max 20% relative change), with l
 MLEntry/
 |-- train_intensive_spice.py           Main training script (SPICE-in-the-loop)
 |-- models/
-|   |-- multi_topology_surrogate.py    Multi-topology surrogate (1.16M params)
+|   |-- multi_topology_surrogate.py    Surrogate model (1.16M params)
 |   +-- forward_surrogate.py           Base surrogate class
 |-- rl/
-|   |-- environment.py                 RL environment (CircuitDesignEnv)
+|   |-- environment.py                 RL environment (state, action, step logic)
 |   |-- ppo_agent.py                   PPO agent (ActorCritic, pure PyTorch)
-|   |-- spice_reward.py                ngspice integration + SPICE reward
+|   |-- spice_reward.py                ngspice subprocess integration
 |   +-- topology_rewards.py            Per-topology reward shaping
 |-- checkpoints/
 |   |-- multi_topology_surrogate.pt    Pre-trained surrogate (required)
 |   +-- rl_agent_<topology>.pt         Trained RL agents (one per topology)
 |-- data/
-|   +-- generate_spice_data.py         SPICE data generation
+|   +-- generate_spice_data.py         SPICE data generation scripts
 +-- training/
     +-- train_surrogate.py             Surrogate model training
 ```
@@ -117,50 +150,26 @@ MLEntry/
 
 ```bash
 # Prerequisites
-brew install ngspice          # macOS
+brew install ngspice            # macOS
 # or: sudo apt install ngspice  # Linux
 
-# Install Python dependencies
 pip install torch numpy scipy matplotlib tqdm
 
-# Verify surrogate loads
-python -c "
-from models.multi_topology_surrogate import load_trained_model
-m = load_trained_model(device='cpu')
-print(f'Surrogate loaded: {sum(p.numel() for p in m.parameters()):,} params')
-"
-
-# Train a specific topology (edit TOPOLOGIES list in script)
+# Train RL agents (edit TOPOLOGIES list in script to pick topologies)
 python -u train_intensive_spice.py
 
-# Or run the full pipeline from scratch
-python data/generate_spice_data.py     # Generate SPICE training data
-python training/train_surrogate.py     # Train surrogate model
-python -u train_intensive_spice.py     # Train RL agents with SPICE validation
+# Or run the full pipeline from scratch:
+python data/generate_spice_data.py     # 1. Generate SPICE training data
+python training/train_surrogate.py     # 2. Train surrogate model
+python -u train_intensive_spice.py     # 3. Train RL agents with SPICE validation
 ```
-
-## Training Details
-
-Each topology trains for hundreds of iterations. Each iteration collects thousands of environment steps using the surrogate, then validates against real ngspice every 5 iterations.
-
-| Topology | Iterations | Steps/Iter | SPICE Calls | Training Time |
-|----------|-----------|------------|-------------|---------------|
-| Buck | 300 | 1024 | ~30K | ~4 hrs |
-| Boost | 400 | 2048 | ~80K | ~12 hrs |
-| Buck-Boost | 350 | 1024 | ~35K | ~6 hrs |
-| SEPIC | 400 | 2048 | ~80K | ~12 hrs |
-| Cuk | 350 | 1024 | ~35K | ~6 hrs |
-| Flyback | 600 | 2048 | ~493K | ~80 hrs |
-| QR Flyback | 700 | 4096 | ~576K+ | ~70+ hrs |
-
-Total compute: 200+ hours of training, 1M+ SPICE simulations across all topologies.
 
 ## Requirements
 
 - Python 3.10+
 - PyTorch 2.0+
 - NumPy, SciPy, tqdm, Matplotlib
-- ngspice (installed and on PATH)
+- ngspice (circuit simulator, installed and on PATH)
 
 ## License
 
