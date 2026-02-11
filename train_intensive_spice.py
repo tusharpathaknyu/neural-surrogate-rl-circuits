@@ -264,12 +264,14 @@ class TopologySpecificEnv(CircuitDesignEnv):
         # Simulate with surrogate
         predicted = self._simulate(self.current_params)
         
-        # SPICE validation every N steps (proper ground truth rewards)
+        # SPICE validation: fire on FIRST step (critical for short episodes that
+        # terminate early at MSE<5) and then every N steps for longer episodes.
+        # Without step 1, SPICE never fires because episodes end too quickly.
         self.step_count += 1
         use_spice_this_step = (
             self.use_spice_reward and 
             self.spice_calculator is not None and
-            self.step_count % self.spice_validation_freq == 0
+            (self.step_count == 1 or self.step_count % self.spice_validation_freq == 0)
         )
         
         # SPICE as a TRUST SIGNAL (agreement-based reward modulation)
