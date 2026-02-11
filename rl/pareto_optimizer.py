@@ -80,7 +80,8 @@ class ParetoOptimizer:
         # Topology mapping
         self.topology_map = {
             'buck': 0, 'boost': 1, 'buck_boost': 2,
-            'sepic': 3, 'cuk': 4, 'flyback': 5
+            'sepic': 3, 'cuk': 4, 'flyback': 5,
+            'qr_flyback': 6
         }
     
     def evaluate_design(self, params: np.ndarray, topology: str,

@@ -24,12 +24,25 @@ class ActorCritic(nn.Module):
     
     Actor: Outputs mean action (what to do)
     Critic: Outputs state value (how good is this state)
+    
+    IMPROVEMENTS (v2):
+    - 3-layer shared backbone (was 2) for complex topologies
+    - Separate deeper actor/critic heads
+    - Per-parameter log_std initialization based on physics
+      (duty cycle is most sensitive → lowest std)
     """
+    
+    # Physics-informed per-parameter exploration noise.
+    # Lower std = less exploration for sensitive params.
+    # L, C, R: moderate sensitivity; V_in: moderate; f_sw: moderate; duty: very sensitive
+    PARAM_LOG_STD_INIT = [-0.5, -0.3, -0.3, -0.7, -0.3, -1.2]
     
     def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 256):
         super().__init__()
         
-        # Shared layers
+        # Shared backbone — 3 layers (was 2)
+        # Extra depth helps complex topologies (SEPIC, Flyback, QR_Flyback)
+        # that have more reactive elements and nonlinear behavior.
         self.shared = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -37,24 +50,39 @@ class ActorCritic(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
         )
         
-        # Actor head - outputs action mean
+        # Actor head — deeper (2 hidden layers instead of 1)
         self.actor_mean = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, action_dim),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 4, action_dim),
             nn.Tanh(),  # Actions in [-1, 1]
         )
         
-        # Learnable log standard deviation
-        self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
+        # Per-parameter learnable log standard deviation
+        # IMPROVEMENT: Initialize based on parameter sensitivity instead of all-zeros.
+        # Duty cycle (index 5) gets lowest std (-1.2 → std≈0.30) because small
+        # duty changes cause large voltage swings. L/C/R get higher std for more
+        # exploration since they're less sensitive.
+        init_log_std = self.PARAM_LOG_STD_INIT[:action_dim]
+        # Pad if action_dim > 6 (shouldn't happen, but safe)
+        while len(init_log_std) < action_dim:
+            init_log_std.append(0.0)
+        self.actor_log_std = nn.Parameter(torch.tensor(init_log_std, dtype=torch.float32))
         
-        # Critic head - outputs state value
+        # Critic head — deeper (2 hidden layers instead of 1)
         self.critic = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 4, 1),
         )
     
     def forward(self, state: torch.Tensor):
@@ -116,6 +144,7 @@ class PPOAgent:
         entropy_coef: float = 0.01,
         value_coef: float = 0.5,
         device: str = 'cpu',
+        n_iterations: int = 300,
     ):
         self.env = env
         self.device = device
@@ -124,6 +153,8 @@ class PPOAgent:
         self.clip_epsilon = clip_epsilon
         self.entropy_coef = entropy_coef
         self.value_coef = value_coef
+        self.initial_lr = lr
+        self.n_iterations = n_iterations
         
         # Create network
         self.policy = ActorCritic(
@@ -134,9 +165,19 @@ class PPOAgent:
         
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         
+        # LR scheduler: linear annealing from lr → lr/10 over training.
+        # High LR early = faster exploration. Low LR late = stable convergence.
+        self.scheduler = optim.lr_scheduler.LinearLR(
+            self.optimizer,
+            start_factor=1.0,
+            end_factor=0.1,
+            total_iters=n_iterations,
+        )
+        
         # Tracking
         self.episode_rewards = []
         self.episode_mses = []
+        self.current_iteration = 0
     
     def collect_rollouts(self, n_steps: int) -> Dict:
         """Collect experience by running policy in environment."""
@@ -177,8 +218,16 @@ class PPOAgent:
             else:
                 state = next_state
         
+        # BUG FIX: Bootstrap last value from critic when episode hasn't ended.
+        # Old code always used next_value=0 at rollout boundary, which is wrong
+        # when the episode is mid-way through (not terminal).
+        last_state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            _, _, last_value = self.policy.get_action(last_state_tensor)
+        last_value = last_value.item()
+        
         # Compute advantages using GAE
-        advantages, returns = self._compute_gae(rewards, values, dones)
+        advantages, returns = self._compute_gae(rewards, values, dones, last_value)
         
         return {
             'states': np.array(states),
@@ -188,18 +237,24 @@ class PPOAgent:
             'advantages': advantages,
         }
     
-    def _compute_gae(self, rewards, values, dones):
-        """Compute Generalized Advantage Estimation."""
+    def _compute_gae(self, rewards, values, dones, last_value=0):
+        """Compute Generalized Advantage Estimation.
+        
+        BUG FIX: last_value now comes from critic's bootstrap estimate
+        instead of always being 0. When rollout ends mid-episode, we need
+        the critic's V(s_next) to properly estimate future returns.
+        """
         advantages = np.zeros(len(rewards))
         last_gae = 0
         
         for t in reversed(range(len(rewards))):
             if t == len(rewards) - 1:
-                next_value = 0
+                next_value = last_value  # Bootstrap from critic (was: always 0)
+                next_non_terminal = 1.0 - dones[t]
             else:
                 next_value = values[t + 1]
+                next_non_terminal = 1.0 - dones[t]
             
-            next_non_terminal = 1.0 - dones[t]
             delta = rewards[t] + self.gamma * next_value * next_non_terminal - values[t]
             advantages[t] = last_gae = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae
         

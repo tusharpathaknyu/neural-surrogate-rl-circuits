@@ -3,6 +3,7 @@ Simple RL Environment for Power Electronics Circuit Design.
 No external dependencies - just numpy and torch.
 
 Phase C: The RL agent uses this environment to learn circuit design.
+Updated: Topology-aware reward system for proper handling of inverted/resonant topologies.
 """
 
 import numpy as np
@@ -13,6 +14,14 @@ import sys
 
 sys.path.append(str(Path(__file__).parent.parent))
 from models.forward_surrogate import ForwardSurrogate
+
+# Import topology-aware rewards
+try:
+    from rl.topology_rewards import compute_topology_aware_reward, get_topology_config
+    TOPOLOGY_AWARE_REWARDS = True
+except ImportError:
+    TOPOLOGY_AWARE_REWARDS = False
+    print("⚠️ Topology-aware rewards not available, using standard rewards")
 
 
 class CircuitDesignEnv:
@@ -27,13 +36,16 @@ class CircuitDesignEnv:
     """
     
     # Parameter bounds (physical constraints)
+    # UPDATED: Widened to cover all 7 topologies' data generation ranges.
+    # Previous narrow bounds (L~100µ, V_in~24) prevented the agent from
+    # designing Boost (low V_in), Flyback (high V_in, large L), etc.
     PARAM_BOUNDS = {
-        'L': (10e-6, 100e-6),       # 10µH to 100µH
-        'C': (47e-6, 470e-6),       # 47µF to 470µF
-        'R_load': (2, 50),          # 2Ω to 50Ω
-        'V_in': (10, 24),           # 10V to 24V
-        'f_sw': (50e3, 500e3),      # 50kHz to 500kHz
-        'duty': (0.2, 0.8),         # 20% to 80%
+        'L': (10e-6, 1000e-6),      # 10µH to 1mH (covers Flyback primary)
+        'C': (47e-6, 1000e-6),      # 47µF to 1000µF (covers Boost/Flyback)
+        'R_load': (2, 100),          # 2Ω to 100Ω (covers Boost/Flyback)
+        'V_in': (3.3, 400),          # 3.3V to 400V (covers Boost battery to Flyback mains)
+        'f_sw': (30e3, 500e3),       # 30kHz to 500kHz (covers QR Flyback to Buck)
+        'duty': (0.1, 0.9),          # 10% to 90% (covers Buck's full range)
     }
     
     PARAM_NAMES = ['L', 'C', 'R_load', 'V_in', 'f_sw', 'duty']
@@ -70,7 +82,13 @@ class CircuitDesignEnv:
         self.is_multi_topology = hasattr(surrogate, 'topology_embedding')
         
         # State and action dimensions
-        self.state_dim = self.NUM_WAVEFORM_FEATURES + self.NUM_PARAMS + 3
+        # State = [target_features(32) + current_pred_features(32) + diff_features(32)
+        #          + params(6) + error(7)] = 109
+        # IMPROVEMENT: diff_features gives the agent an explicit error signal
+        # per feature dimension, so it doesn't have to learn subtraction.
+        # error expanded to include DC error, ripple error, per-step fraction, 
+        # improvement rate.
+        self.state_dim = self.NUM_WAVEFORM_FEATURES * 3 + self.NUM_PARAMS + 7
         self.action_dim = self.NUM_PARAMS
         
         # Episode state
@@ -105,15 +123,21 @@ class CircuitDesignEnv:
         self.prev_mse = None
     
     def _normalize_params(self, params: np.ndarray) -> np.ndarray:
-        """Normalize parameters to [0, 1] range."""
+        """Normalize parameters to [0, 1] range.
+        
+        BUG FIX: Clamp values to PARAM_BOUNDS before normalizing.
+        Previously, if V_in exceeded bounds (e.g., 36 with max=24),
+        normalized value would be >1, corrupting policy network inputs.
+        """
         normalized = np.zeros(self.NUM_PARAMS)
         for i, name in enumerate(self.PARAM_NAMES):
             low, high = self.PARAM_BOUNDS[name]
+            val = np.clip(params[i], low, high)  # Ensure within bounds
             if name in ['L', 'C', 'f_sw']:
-                normalized[i] = (np.log(params[i]) - np.log(low)) / (np.log(high) - np.log(low))
+                normalized[i] = (np.log(val) - np.log(low)) / (np.log(high) - np.log(low))
             else:
-                normalized[i] = (params[i] - low) / (high - low)
-        return normalized
+                normalized[i] = (val - low) / (high - low)
+        return np.clip(normalized, 0.0, 1.0)  # Final safety clamp
     
     def _extract_waveform_features(self, waveform: np.ndarray) -> np.ndarray:
         """Extract compact features from waveform for state representation."""
@@ -150,7 +174,7 @@ class CircuitDesignEnv:
             
             if self.is_multi_topology:
                 # Multi-topology model needs topology_ids
-                topology_map = {'buck': 0, 'boost': 1, 'buck_boost': 2, 'sepic': 3, 'cuk': 4, 'flyback': 5}
+                topology_map = {'buck': 0, 'boost': 1, 'buck_boost': 2, 'sepic': 3, 'cuk': 4, 'flyback': 5, 'qr_flyback': 6}
                 topology_id = topology_map.get(self.topology, 0)
                 topology_ids = torch.tensor([topology_id], dtype=torch.long, device=self.device)
                 
@@ -166,35 +190,86 @@ class CircuitDesignEnv:
             return waveform.cpu().numpy().squeeze()
     
     def _get_state(self) -> np.ndarray:
-        """Construct state vector for the agent."""
+        """Construct state vector for the agent.
+        
+        IMPROVEMENT (v3): Added explicit difference features and richer error signals.
+        
+        Previous state (73 dims):
+          [target_features(32), current_features(32), params(6), error(3)]
+        
+        New state (109 dims):
+          [target_features(32), current_features(32), diff_features(32),
+           params(6), error(7)]
+        
+        diff_features = target - current per feature dimension.
+        This gives the agent a direct gradient signal: "FFT bin 3 is too high"
+        instead of having to internally compare target[35] vs current[67].
+        
+        error signals expanded to include:
+          - log MSE (overall error magnitude)
+          - step fraction (time pressure)
+          - log prev_mse (was it improving?)
+          - DC error (most important engineering metric)
+          - ripple error (second most important)
+          - improvement rate (prev_mse - mse) / prev_mse
+          - log step count (how many attempts so far)
+        """
         target_features = self._extract_waveform_features(self.target_waveform)
         norm_params = self._normalize_params(self.current_params)
         
         current_waveform = self._simulate(self.current_params)
+        current_features = self._extract_waveform_features(current_waveform)
+        
+        # Explicit difference features: what needs to change and by how much?
+        diff_features = target_features - current_features
+        
         mse = np.mean((current_waveform - self.target_waveform) ** 2)
+        dc_error = abs(np.mean(current_waveform) - np.mean(self.target_waveform))
+        ripple_pred = np.max(current_waveform) - np.min(current_waveform)
+        ripple_target = np.max(self.target_waveform) - np.min(self.target_waveform)
+        ripple_error = abs(ripple_pred - ripple_target) / (ripple_target + 1e-2)
+        
+        improvement = 0.0
+        if self.prev_mse is not None and self.prev_mse > 0:
+            improvement = (self.prev_mse - mse) / (self.prev_mse + 1e-8)
         
         error_signal = np.array([
-            mse,
+            np.log1p(mse),
             self.current_step / self.max_steps,
-            self.prev_mse if self.prev_mse else mse,
+            np.log1p(self.prev_mse) if self.prev_mse else np.log1p(mse),
+            np.log1p(dc_error),
+            np.clip(ripple_error, 0, 5),
+            np.clip(improvement, -2, 2),
+            np.log1p(self.current_step),
         ], dtype=np.float32)
         
-        return np.concatenate([target_features, norm_params, error_signal]).astype(np.float32)
+        return np.concatenate([
+            target_features, current_features, diff_features,
+            norm_params, error_signal
+        ]).astype(np.float32)
     
     def _compute_reward(self, predicted: np.ndarray, target: np.ndarray) -> Tuple[float, Dict]:
         """
         Compute reward based on engineering metrics.
         
-        This is the COMPLEX REWARD FUNCTION from the screenshot:
-        - THD (Total Harmonic Distortion)
-        - Rise Time
-        - Power Efficiency (proxy)
-        - Overshoot penalty
+        Now uses TOPOLOGY-AWARE reward system:
+        - Inverted topologies (Buck-Boost, Cuk): Handle negative voltage correctly
+        - Resonant topologies (QR Flyback): Different THD interpretation
+        - Different efficiency targets per topology
         """
+        
+        # Use topology-aware rewards if available
+        if TOPOLOGY_AWARE_REWARDS:
+            return compute_topology_aware_reward(
+                predicted, target, self.topology, self.prev_mse
+            )
+        
+        # Fallback to standard rewards (legacy)
         info = {}
         
-        # 1. MSE - basic waveform matching
+        # 1. MSE - basic waveform matching (log-scaled to prevent dominance)
         mse = np.mean((predicted - target) ** 2)
+        log_mse = np.log1p(mse)
         info['mse'] = mse
         
         # 2. THD comparison
@@ -249,18 +324,18 @@ class CircuitDesignEnv:
             improvement = (self.prev_mse - mse) / (self.prev_mse + 1e-8)
         info['improvement'] = improvement
         
-        # Success check
-        success = mse < 0.001
+        # Success check (BUG FIX: was 0.001, now realistic)
+        success = mse < 5.0
         info['success'] = success
         
-        # TOTAL REWARD - weighted combination
+        # TOTAL REWARD - weighted combination (BUG FIX: use log_mse)
         reward = (
-            -1.0 * mse +              # Match waveform shape
+            -1.0 * log_mse +              # Match waveform shape (log-scaled)
             -0.5 * thd_error +        # Match harmonic content
             -0.3 * rise_error +       # Match rise time
             -0.5 * ripple_error +     # Match ripple
             -2.0 * overshoot +        # Heavy penalty for overshoot
-            -0.5 * dc_error +         # Match DC level
+            -0.5 * np.log1p(dc_error) + # Match DC level (log-scaled)
             1.0 * max(0, improvement) + # Bonus for improving
             10.0 * (1.0 if success else 0)  # Big bonus for success
         )

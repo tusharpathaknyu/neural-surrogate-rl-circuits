@@ -204,6 +204,7 @@ def load_models():
     if ckpt_path.exists():
         ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
         SURROGATE.load_state_dict(ckpt['model_state_dict'])
+        SURROGATE._waveform_stats = ckpt.get('waveform_stats', None)
         print(f"✓ Loaded multi-topology surrogate (val_loss={ckpt.get('val_loss', 'N/A'):.4f})")
     else:
         # Fallback to old model

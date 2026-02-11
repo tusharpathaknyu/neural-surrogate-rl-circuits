@@ -36,13 +36,16 @@ class CircuitDesignEnv:
     """
     
     # Parameter bounds (physical constraints)
+    # UPDATED: Widened to cover all 7 topologies' data generation ranges.
+    # Previous narrow bounds (L~100µ, V_in~24) prevented the agent from
+    # designing Boost (low V_in), Flyback (high V_in, large L), etc.
     PARAM_BOUNDS = {
-        'L': (10e-6, 100e-6),       # 10µH to 100µH
-        'C': (47e-6, 470e-6),       # 47µF to 470µF
-        'R_load': (2, 50),          # 2Ω to 50Ω
-        'V_in': (10, 24),           # 10V to 24V
-        'f_sw': (50e3, 500e3),      # 50kHz to 500kHz
-        'duty': (0.2, 0.8),         # 20% to 80%
+        'L': (10e-6, 1000e-6),      # 10µH to 1mH (covers Flyback primary)
+        'C': (47e-6, 1000e-6),      # 47µF to 1000µF (covers Boost/Flyback)
+        'R_load': (2, 100),          # 2Ω to 100Ω (covers Boost/Flyback)
+        'V_in': (3.3, 400),          # 3.3V to 400V (covers Boost battery to Flyback mains)
+        'f_sw': (30e3, 500e3),       # 30kHz to 500kHz (covers QR Flyback to Buck)
+        'duty': (0.1, 0.9),          # 10% to 90% (covers Buck's full range)
     }
     
     PARAM_NAMES = ['L', 'C', 'R_load', 'V_in', 'f_sw', 'duty']
@@ -79,8 +82,13 @@ class CircuitDesignEnv:
         self.is_multi_topology = hasattr(surrogate, 'topology_embedding')
         
         # State and action dimensions
-        # State = [target_features(32) + current_pred_features(32) + params(6) + error(3)] = 73
-        self.state_dim = self.NUM_WAVEFORM_FEATURES * 2 + self.NUM_PARAMS + 3
+        # State = [target_features(32) + current_pred_features(32) + diff_features(32)
+        #          + params(6) + error(7)] = 109
+        # IMPROVEMENT: diff_features gives the agent an explicit error signal
+        # per feature dimension, so it doesn't have to learn subtraction.
+        # error expanded to include DC error, ripple error, per-step fraction, 
+        # improvement rate.
+        self.state_dim = self.NUM_WAVEFORM_FEATURES * 3 + self.NUM_PARAMS + 7
         self.action_dim = self.NUM_PARAMS
         
         # Episode state
@@ -184,26 +192,61 @@ class CircuitDesignEnv:
     def _get_state(self) -> np.ndarray:
         """Construct state vector for the agent.
         
-        BUG FIX: Now includes BOTH target AND current prediction features,
-        so the agent knows WHERE its prediction differs from target (not just 
-        a scalar MSE). This gives directional gradient information.
+        IMPROVEMENT (v3): Added explicit difference features and richer error signals.
         
-        State = [target_features(32), current_pred_features(32), norm_params(6), error_signals(3)] = 73 dims
+        Previous state (73 dims):
+          [target_features(32), current_features(32), params(6), error(3)]
+        
+        New state (109 dims):
+          [target_features(32), current_features(32), diff_features(32),
+           params(6), error(7)]
+        
+        diff_features = target - current per feature dimension.
+        This gives the agent a direct gradient signal: "FFT bin 3 is too high"
+        instead of having to internally compare target[35] vs current[67].
+        
+        error signals expanded to include:
+          - log MSE (overall error magnitude)
+          - step fraction (time pressure)
+          - log prev_mse (was it improving?)
+          - DC error (most important engineering metric)
+          - ripple error (second most important)
+          - improvement rate (prev_mse - mse) / prev_mse
+          - log step count (how many attempts so far)
         """
         target_features = self._extract_waveform_features(self.target_waveform)
         norm_params = self._normalize_params(self.current_params)
         
         current_waveform = self._simulate(self.current_params)
         current_features = self._extract_waveform_features(current_waveform)
+        
+        # Explicit difference features: what needs to change and by how much?
+        diff_features = target_features - current_features
+        
         mse = np.mean((current_waveform - self.target_waveform) ** 2)
+        dc_error = abs(np.mean(current_waveform) - np.mean(self.target_waveform))
+        ripple_pred = np.max(current_waveform) - np.min(current_waveform)
+        ripple_target = np.max(self.target_waveform) - np.min(self.target_waveform)
+        ripple_error = abs(ripple_pred - ripple_target) / (ripple_target + 1e-2)
+        
+        improvement = 0.0
+        if self.prev_mse is not None and self.prev_mse > 0:
+            improvement = (self.prev_mse - mse) / (self.prev_mse + 1e-8)
         
         error_signal = np.array([
-            np.log1p(mse),  # Log-scale MSE to prevent huge values dominating
+            np.log1p(mse),
             self.current_step / self.max_steps,
             np.log1p(self.prev_mse) if self.prev_mse else np.log1p(mse),
+            np.log1p(dc_error),
+            np.clip(ripple_error, 0, 5),
+            np.clip(improvement, -2, 2),
+            np.log1p(self.current_step),
         ], dtype=np.float32)
         
-        return np.concatenate([target_features, current_features, norm_params, error_signal]).astype(np.float32)
+        return np.concatenate([
+            target_features, current_features, diff_features,
+            norm_params, error_signal
+        ]).astype(np.float32)
     
     def _compute_reward(self, predicted: np.ndarray, target: np.ndarray) -> Tuple[float, Dict]:
         """

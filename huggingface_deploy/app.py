@@ -193,6 +193,7 @@ def load_models():
     if ckpt_path.exists():
         ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
         SURROGATE.load_state_dict(ckpt['model_state_dict'])
+        SURROGATE._waveform_stats = ckpt.get('waveform_stats', None)
         print(f"✓ Loaded multi-topology surrogate (val_loss={ckpt.get('val_loss', 'N/A'):.4f})")
     else:
         # Fallback to old model
@@ -450,6 +451,7 @@ def design_circuit(topology: str, v_in: float, v_out: float,
         "SEPIC (Non-Inverting)": "sepic",
         "Ćuk (Continuous Current)": "cuk",
         "Flyback (Isolated)": "flyback",
+        "QR Flyback (Soft-Switching)": "qr_flyback",
     }
     ENV.topology = topo_name_map.get(topology, "buck")
     
@@ -1228,7 +1230,7 @@ def create_demo():
         5. **Flyback** when you need galvanic isolation (safety)
         
         ---
-        *Trained on 30,000 SPICE simulations (5,000 per topology) | [GitHub](https://github.com/tusharpathaknyu/neural-surrogate-rl-circuits)*
+        *Trained on 35,000 SPICE simulations (5,000 per topology) | [GitHub](https://github.com/tusharpathaknyu/neural-surrogate-rl-circuits)*
         """)
     
     return demo

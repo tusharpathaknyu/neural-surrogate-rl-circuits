@@ -213,6 +213,9 @@ class TopologySpecificEnv(CircuitDesignEnv):
         self.spice_mse_history = []
         self.step_count = 0
         
+        # Training progress for staged thresholds (set externally)
+        self.training_progress = 0.0  # 0.0 = start, 1.0 = end
+        
     def reset(self):
         """Reset environment with topology-appropriate target.
         
@@ -248,9 +251,12 @@ class TopologySpecificEnv(CircuitDesignEnv):
         # Apply action (clipped deltas)
         action = np.clip(action, -1, 1)
         
-        # BUG FIX: Was using 0.1 (10%) max change vs base env's 0.2 (20%).
-        # Less exploration = slower convergence. Match base env.
-        max_change_pct = 0.2
+        # IMPROVEMENT: Adaptive action scale that shrinks over the episode.
+        # Early steps: 20% max change (coarse exploration)
+        # Late steps: 5% max change (fine-tuning)
+        # This lets the agent make big jumps initially, then refine.
+        episode_progress = self.step_count / max(self.max_steps, 1)
+        max_change_pct = 0.20 - 0.15 * episode_progress  # 20% -> 5%
         
         for i, name in enumerate(self.PARAM_NAMES):
             low, high = self.PARAM_BOUNDS[name]
@@ -375,7 +381,25 @@ class TopologySpecificEnv(CircuitDesignEnv):
         self.prev_mse = info['mse']
         self.current_step += 1
         
-        done = (self.current_step >= self.max_steps) or (info['mse'] < 5.0)
+        # IMPROVEMENT: Staged early termination threshold.
+        # Early training (0-30%): terminate at MSE < 5.0 (learn coarse matching)
+        # Mid training (30-70%): terminate at MSE < 2.0 (learn refinement)
+        # Late training (70-100%): terminate at MSE < 1.0 (learn fine-tuning)
+        #
+        # Old approach: always MSE < 5.0, which meant the agent NEVER learned
+        # to refine below 5.0 — episodes ended the moment it got close.
+        p = self.training_progress  # 0.0 to 1.0
+        if p < 0.3:
+            success_threshold = 5.0
+        elif p < 0.7:
+            success_threshold = 2.0
+        else:
+            success_threshold = 1.0
+        
+        done = (self.current_step >= self.max_steps) or (info['mse'] < success_threshold)
+        # Give success bonus at any stage
+        if info['mse'] < success_threshold:
+            info['success'] = True
         
         return self._get_state(), reward, done, info
 
@@ -410,6 +434,7 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
         entropy_coef=config['entropy_coef'],
         value_coef=0.5,
         device=DEVICE,
+        n_iterations=config['n_iterations'],
     )
     
     # Training tracking
@@ -424,11 +449,18 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
     pbar = tqdm(range(config['n_iterations']), desc=f"{topology}")
     
     for iteration in pbar:
+        # Update training progress for staged termination threshold
+        env.training_progress = iteration / max(config['n_iterations'] - 1, 1)
+        
         # Collect rollouts
         rollout = agent.collect_rollouts(config['steps_per_iter'])
         
         # Update policy
         agent.update(rollout, n_epochs=10, batch_size=64)
+        
+        # Step LR scheduler (linear annealing)
+        agent.scheduler.step()
+        agent.current_iteration = iteration
         
         # Track performance
         if len(agent.episode_rewards) > 0:

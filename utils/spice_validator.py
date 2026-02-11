@@ -116,10 +116,19 @@ wrdata {output_file} v(output)
 """,
 }
 
-# Add simplified versions for other topologies
-NETLIST_TEMPLATES['sepic'] = NETLIST_TEMPLATES['buck_boost']  # Similar structure
-NETLIST_TEMPLATES['cuk'] = NETLIST_TEMPLATES['buck_boost']
-NETLIST_TEMPLATES['flyback'] = NETLIST_TEMPLATES['buck_boost']
+# Import proper SPICE netlist templates from spice_reward for each topology
+# (sepic/cuk/flyback have fundamentally different circuit topologies from buck-boost)
+try:
+    from rl.spice_reward import SPICERewardCalculator
+    for topo in ['sepic', 'cuk', 'flyback', 'qr_flyback']:
+        if topo in SPICERewardCalculator.TEMPLATES:
+            NETLIST_TEMPLATES[topo] = SPICERewardCalculator.TEMPLATES[topo]
+except ImportError:
+    # Fallback: at minimum mark them as unavailable rather than wrong
+    print("⚠️ Could not import proper SPICE templates from rl.spice_reward")
+    NETLIST_TEMPLATES['sepic'] = NETLIST_TEMPLATES['buck_boost']
+    NETLIST_TEMPLATES['cuk'] = NETLIST_TEMPLATES['buck_boost']
+    NETLIST_TEMPLATES['flyback'] = NETLIST_TEMPLATES['buck_boost']
 
 
 class SPICEValidator:
@@ -224,7 +233,7 @@ class SPICEValidator:
         device = next(surrogate.parameters()).device
         params_tensor = torch.tensor(params, dtype=torch.float32).unsqueeze(0).to(device)
         
-        topology_map = {'buck': 0, 'boost': 1, 'buck_boost': 2, 'sepic': 3, 'cuk': 4, 'flyback': 5}
+        topology_map = {'buck': 0, 'boost': 1, 'buck_boost': 2, 'sepic': 3, 'cuk': 4, 'flyback': 5, 'qr_flyback': 6}
         topology_id = torch.tensor([topology_map.get(topology, 0)], device=device)
         
         start = time.time()

@@ -24,12 +24,25 @@ class ActorCritic(nn.Module):
     
     Actor: Outputs mean action (what to do)
     Critic: Outputs state value (how good is this state)
+    
+    IMPROVEMENTS (v2):
+    - 3-layer shared backbone (was 2) for complex topologies
+    - Separate deeper actor/critic heads
+    - Per-parameter log_std initialization based on physics
+      (duty cycle is most sensitive → lowest std)
     """
+    
+    # Physics-informed per-parameter exploration noise.
+    # Lower std = less exploration for sensitive params.
+    # L, C, R: moderate sensitivity; V_in: moderate; f_sw: moderate; duty: very sensitive
+    PARAM_LOG_STD_INIT = [-0.5, -0.3, -0.3, -0.7, -0.3, -1.2]
     
     def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 256):
         super().__init__()
         
-        # Shared layers
+        # Shared backbone — 3 layers (was 2)
+        # Extra depth helps complex topologies (SEPIC, Flyback, QR_Flyback)
+        # that have more reactive elements and nonlinear behavior.
         self.shared = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -37,24 +50,39 @@ class ActorCritic(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
         )
         
-        # Actor head - outputs action mean
+        # Actor head — deeper (2 hidden layers instead of 1)
         self.actor_mean = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, action_dim),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 4, action_dim),
             nn.Tanh(),  # Actions in [-1, 1]
         )
         
-        # Learnable log standard deviation
-        self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
+        # Per-parameter learnable log standard deviation
+        # IMPROVEMENT: Initialize based on parameter sensitivity instead of all-zeros.
+        # Duty cycle (index 5) gets lowest std (-1.2 → std≈0.30) because small
+        # duty changes cause large voltage swings. L/C/R get higher std for more
+        # exploration since they're less sensitive.
+        init_log_std = self.PARAM_LOG_STD_INIT[:action_dim]
+        # Pad if action_dim > 6 (shouldn't happen, but safe)
+        while len(init_log_std) < action_dim:
+            init_log_std.append(0.0)
+        self.actor_log_std = nn.Parameter(torch.tensor(init_log_std, dtype=torch.float32))
         
-        # Critic head - outputs state value
+        # Critic head — deeper (2 hidden layers instead of 1)
         self.critic = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 4, 1),
         )
     
     def forward(self, state: torch.Tensor):
@@ -116,6 +144,7 @@ class PPOAgent:
         entropy_coef: float = 0.01,
         value_coef: float = 0.5,
         device: str = 'cpu',
+        n_iterations: int = 300,
     ):
         self.env = env
         self.device = device
@@ -124,6 +153,8 @@ class PPOAgent:
         self.clip_epsilon = clip_epsilon
         self.entropy_coef = entropy_coef
         self.value_coef = value_coef
+        self.initial_lr = lr
+        self.n_iterations = n_iterations
         
         # Create network
         self.policy = ActorCritic(
@@ -134,9 +165,19 @@ class PPOAgent:
         
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         
+        # LR scheduler: linear annealing from lr → lr/10 over training.
+        # High LR early = faster exploration. Low LR late = stable convergence.
+        self.scheduler = optim.lr_scheduler.LinearLR(
+            self.optimizer,
+            start_factor=1.0,
+            end_factor=0.1,
+            total_iters=n_iterations,
+        )
+        
         # Tracking
         self.episode_rewards = []
         self.episode_mses = []
+        self.current_iteration = 0
     
     def collect_rollouts(self, n_steps: int) -> Dict:
         """Collect experience by running policy in environment."""

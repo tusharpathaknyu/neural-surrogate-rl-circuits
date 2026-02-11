@@ -395,7 +395,7 @@ def load_trained_model(checkpoint_path: str = None, device: str = 'cpu') -> Mult
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     
     # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Determine num_topologies from checkpoint (handle both 6 and 7)
     state_dict = checkpoint.get('model_state_dict', checkpoint)
