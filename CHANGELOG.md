@@ -1,5 +1,41 @@
 # Changelog — Neural Surrogate + RL for Power Electronics
 
+## [2026-02-12] Full Training Run Complete — 4/7 Topologies Excellent
+
+### Training Results (11.7M steps, 11.47 hours)
+
+First complete SPICE-in-the-loop training run with all fixes applied (exploitation fix, per-topology bounds, trust dampening, 6 RL improvements).
+
+| Topology | Surrogate MSE | SPICE MSE | Verdict |
+|----------|:------------:|:---------:|---------|
+| buck | 3.1 | 4.2 | ✅ Excellent |
+| boost | 3.8 | — | ✅ Excellent |
+| sepic | 3.3 | — | ✅ Excellent |
+| cuk | 3.5 | 4.3 | ✅ Excellent |
+| qr_flyback | 47.1 | 2.2 | ⚠️ Fair (surrogate issue) |
+| flyback | 170.6 | — | ❌ Needs work |
+| buck_boost | 594.9 | — | ❌ Needs work |
+
+Full details: [TRAINING_RESULTS.md](TRAINING_RESULTS.md)
+
+---
+
+## [2026-02-11] Fix Surrogate Exploitation (commit `0b5a971`)
+
+- Added `PER_TOPOLOGY_PARAM_BOUNDS` matching data generation ranges per topology
+- Increased SPICE validation rate: 10% → 20% of episodes
+- Added SPICE trust EMA (α=0.3) with reward dampening: `reward *= (0.5 + 0.5×trust)`
+- Reduced SPICE wf_mse blowups from 52,782 → max 3,182
+
+## [2026-02-11] Pipeline Audit & 8 Critical Fixes (commit `732e161`)
+
+- Synced stale HuggingFace deploy code (state_dim 41→109)
+- Added `qr_flyback` to 3 missing topology maps
+- Fixed `spice_validator.py` templates (SEPIC/Cuk/Flyback were aliased to buck_boost)
+- Widened `PARAM_BOUNDS` for all 7 topologies
+- Fixed `weights_only=True` → `False` in HF surrogate loading
+- Added `_waveform_stats` loading in demo apps
+
 ## [2026-02-11] Root Cause Fix: 3 Critical Bugs (commit `2d84f67`)
 
 ### Summary
