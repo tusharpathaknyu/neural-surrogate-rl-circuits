@@ -267,21 +267,108 @@ class TopologySpecificEnv(CircuitDesignEnv):
         # Training progress for staged thresholds (set externally)
         self.training_progress = 0.0  # 0.0 = start, 1.0 = end
         
+        # FORMULA MODE: For topologies where the neural surrogate is internally
+        # inconsistent (buck_boost), bypass the surrogate entirely and use
+        # analytical transfer functions for targets and predictions.
+        # Investigation showed buck_boost surrogate predictions are random
+        # (range +50V to -112V for params that should give -4 to -27V),
+        # making it impossible for RL to learn from surrogate-based rewards.
+        self.use_formula_mode = topology in ['buck_boost', 'flyback', 'qr_flyback']
+        if self.use_formula_mode:
+            print(f"  [FORMULA MODE] {topology}: using analytical transfer function "
+                  f"instead of neural surrogate")
+    
+    def _simulate(self, params: np.ndarray) -> np.ndarray:
+        """Override: use formula for formula-mode topologies, surrogate otherwise.
+        
+        This override ensures ALL code paths that call _simulate() (including
+        _get_state() in the base class) use the physics formula when the
+        surrogate is unreliable.
+        """
+        if self.use_formula_mode:
+            return self._formula_predict(params)
+        return super()._simulate(params)
+    
+    def _formula_predict(self, params: np.ndarray, output_points: int = 512) -> np.ndarray:
+        """Physics-based voltage prediction using analytical transfer functions.
+        
+        Used instead of the neural surrogate for topologies where the surrogate
+        is internally inconsistent (e.g., buck_boost). The analytical formula
+        is accurate to within ~8-10% of SPICE for DC voltage.
+        
+        Args:
+            params: [L, C, R_load, V_in, f_sw, duty]
+            output_points: Number of output points (default 512 to match surrogate)
+            
+        Returns:
+            Steady-state waveform with realistic ripple
+        """
+        v_in = params[3]
+        duty = params[5]
+        
+        # Transfer function for each topology (no clipping — use actual values)
+        if self.topology == 'buck':
+            v_out = v_in * duty
+        elif self.topology == 'boost':
+            v_out = v_in / max(1 - duty, 0.05)
+        elif self.topology == 'buck_boost':
+            v_out = -v_in * duty / max(1 - duty, 0.05)
+        elif self.topology == 'sepic':
+            v_out = v_in * duty / max(1 - duty, 0.05)
+        elif self.topology == 'cuk':
+            v_out = -v_in * duty / max(1 - duty, 0.05)
+        elif self.topology == 'flyback':
+            v_out = v_in * duty / max(1 - duty, 0.05)  # 1:1 turns ratio
+        elif self.topology == 'qr_flyback':
+            eff_duty = duty * 0.95
+            v_out = v_in * eff_duty / max(1 - eff_duty, 0.05)
+        else:
+            v_out = v_in * duty
+        
+        # Apply duty-dependent loss factor to better match SPICE.
+        # Higher duty → more conduction losses → bigger magnitude reduction.
+        efficiency = 0.95 - 0.15 * duty  # 95% at D=0, 80% at D=1
+        if v_out < 0:
+            v_out *= (2 - efficiency)  # For negative: v_out becomes more negative
+        else:
+            v_out *= efficiency  # For positive: v_out becomes smaller
+        
+        # Build steady-state waveform with realistic ripple
+        t = np.linspace(0, 0.01, output_points)
+        ripple_config = TOPOLOGY_REWARD_CONFIG.get(self.topology, {})
+        ripple_pct = ripple_config.get('ripple_target', 0.03)
+        
+        waveform = np.ones(output_points, dtype=np.float32) * v_out
+        waveform += ripple_pct * abs(v_out) * np.sin(2 * np.pi * 10 * t)
+        waveform += np.random.normal(0, 0.005 * abs(v_out) + 0.01, output_points)
+        
+        return waveform.astype(np.float32)
+    
     def reset(self):
         """Reset environment with topology-appropriate target.
         
-        BUG FIX (v2): Instead of using create_target_waveform() with manual transfer
-        functions, we generate targets by running the SURROGATE on random params.
-        This guarantees target-surrogate alignment for ALL topologies.
+        For FORMULA MODE topologies (buck_boost): Uses analytical transfer
+        functions instead of the neural surrogate, because the surrogate
+        is internally inconsistent for these topologies. Also tries SPICE
+        for ground-truth targets when available.
         
-        Old approach had 2 fatal mismatches:
-          - buck_boost/cuk: surrogate outputs positive, target was negative (MSE=4339)
-          - qr_flyback: surrogate uses buck scaling, target used QR formula (MSE=216)
+        For OTHER topologies: Uses the surrogate for targets, which guarantees
+        target-surrogate alignment since both use the same model.
         """
-        # Generate target by running surrogate with random params
-        # This is what the base env does, and it guarantees alignment
         target_params = self._random_params()
-        self.target_waveform = self._simulate(target_params)
+        
+        if self.use_formula_mode and self.spice_calculator is not None:
+            # Try SPICE first for highest-accuracy targets
+            spice_target = self.spice_calculator.simulate(target_params)
+            if spice_target is not None:
+                self.target_waveform = self.spice_calculator.resample_to_target(
+                    spice_target, 512)
+            else:
+                # Fall back to formula
+                self.target_waveform = self._simulate(target_params)
+        else:
+            # Uses surrogate (normal) or formula (formula mode without SPICE)
+            self.target_waveform = self._simulate(target_params)
         
         # Random DIFFERENT starting parameters (agent must find the right ones)
         self.current_params = self._random_params()
@@ -290,10 +377,11 @@ class TopologySpecificEnv(CircuitDesignEnv):
         self.prev_mse = None
         self.step_count = 0
         
-        # 20% of episodes get SPICE validation (was 10%: too low,
-        # agent exploited surrogate between sparse SPICE checks)
+        # SPICE episode rate: 50% for formula mode (need more ground truth),
+        # 20% for normal mode
         import random
-        self.spice_this_episode = (random.random() < 0.20)
+        spice_rate = 0.50 if self.use_formula_mode else 0.20
+        self.spice_this_episode = (random.random() < spice_rate)
         
         return self._get_state()
     
@@ -323,7 +411,7 @@ class TopologySpecificEnv(CircuitDesignEnv):
                     self.current_params[i] + delta, low, high
                 )
         
-        # Simulate with surrogate
+        # Simulate (formula for formula-mode topologies, surrogate otherwise)
         predicted = self._simulate(self.current_params)
         
         # SPICE validation: only on randomly-sampled episodes (10%) at step 1.
