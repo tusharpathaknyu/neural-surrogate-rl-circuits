@@ -198,7 +198,9 @@ def compute_topology_aware_reward(predicted: np.ndarray, target: np.ndarray,
     
     pred_rise = compute_rise_time(pred_for_metrics)
     target_rise = compute_rise_time(target_for_metrics)
-    rise_error = abs(pred_rise - target_rise) / (target_rise + 1e-8)
+    # Use max(target_rise, 1.0) to avoid amplifying noise when rise time
+    # is near-zero (steady-state / formula-mode flat waveforms)
+    rise_error = abs(pred_rise - target_rise) / max(target_rise, 1.0)
     rise_error = min(rise_error, 5.0)  # Cap to prevent reward explosion
     info['rise_error'] = rise_error
     

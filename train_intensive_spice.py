@@ -327,11 +327,11 @@ class TopologySpecificEnv(CircuitDesignEnv):
         
         # Apply duty-dependent loss factor to better match SPICE.
         # Higher duty → more conduction losses → bigger magnitude reduction.
+        # Multiplying by efficiency (<1) reduces magnitude for BOTH signs:
+        #   positive: 20 * 0.875 = 17.5 (smaller)
+        #   negative: -20 * 0.875 = -17.5 (less negative = smaller magnitude)
         efficiency = 0.95 - 0.15 * duty  # 95% at D=0, 80% at D=1
-        if v_out < 0:
-            v_out *= (2 - efficiency)  # For negative: v_out becomes more negative
-        else:
-            v_out *= efficiency  # For positive: v_out becomes smaller
+        v_out *= efficiency
         
         # Build steady-state waveform with realistic ripple
         t = np.linspace(0, 0.01, output_points)
