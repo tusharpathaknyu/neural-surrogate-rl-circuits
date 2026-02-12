@@ -155,11 +155,14 @@ PER_TOPOLOGY_PARAM_BOUNDS = {
     },
     'flyback': {
         'L': (100e-6, 1000e-6), 'C': (100e-6, 1000e-6), 'R_load': (5, 100),
-        'V_in': (12, 400), 'f_sw': (50e3, 150e3), 'duty': (0.2, 0.5),
+        'V_in': (12, 100), 'f_sw': (30e3, 150e3), 'duty': (0.2, 0.65),
+        # V_in narrowed from (12, 400) — surrogate std=165V at full range
+        # causes wild generalization. Focus on well-modeled region first.
     },
     'qr_flyback': {
         'L': (100e-6, 1000e-6), 'C': (100e-6, 1000e-6), 'R_load': (5, 100),
-        'V_in': (12, 400), 'f_sw': (30e3, 120e3), 'duty': (0.15, 0.45),
+        'V_in': (12, 100), 'f_sw': (30e3, 120e3), 'duty': (0.15, 0.45),
+        # V_in narrowed from (12, 400) — same surrogate accuracy concern.
     },
 }
 

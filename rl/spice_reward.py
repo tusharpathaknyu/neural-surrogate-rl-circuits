@@ -111,7 +111,7 @@ Rload output 0 {{R_val}}
 .control
 run
 set filetype=ascii
-wrdata {output_file} -v(output)
+wrdata {output_file} v(output)
 .endc
 .end
 """,
@@ -362,8 +362,11 @@ wrdata {output_file} v(output)
                 if len(data.shape) == 2 and data.shape[1] >= 2:
                     waveform = data[:, 1]
                     
-                    # Handle inverted outputs
-                    if self.topology in ['buck_boost', 'cuk']:
+                    # Handle inverted outputs — keep sign consistent with
+                    # data generation (wrdata v(output)). Buck_boost removed:
+                    # its data is negative and surrogate predicts negative,
+                    # so SPICE must also return negative for agreement to work.
+                    if self.topology in ['cuk']:
                         waveform = np.abs(waveform)
                     
                     # DO NOT resample — keep full resolution!
