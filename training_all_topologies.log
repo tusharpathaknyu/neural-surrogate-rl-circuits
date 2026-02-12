@@ -1,27 +1,0 @@
-Using device: cpu (forced for stability)
-
-======================================================================
-INTENSIVE SPICE-IN-THE-LOOP TRAINING
-======================================================================
-Start time: 2026-02-11 04:30:26
-Device: cpu
-Topologies: buck, boost, buck_boost, sepic, cuk, flyback, qr_flyback
-Total training steps: 11,673,600
-Estimated time: ~12-18 hours
-
-Loading multi-topology surrogate...
-  ✓ Loaded surrogate: 1,157,731 params
-
-[1/7] Training buck...
-
-============================================================
-Training BUCK Agent
-============================================================
-  Config: 300 iters × 2048 steps
-  = 614,400 total steps
-  SPICE validation every 5 iterations
-  Description: Simple step-down, linear V_out=V_in×D
-buck:   0%|          | 0/300 [00:00<?, ?it/s]buck:   0%|          | 1/300 [01:50<9:12:26, 110.86s/it]buck:   1%|          | 2/300 [03:46<9:24:14, 113.61s/it]buck:   1%|          | 3/300 [05:48<9:40:45, 117.33s/it]buck:   1%|▏         | 4/300 [08:08<10:23:04, 126.30s/it]buck:   1%|▏         | 4/300 [10:48<10:23:04, 126.30s/it, spice_mse=7.4, best=inf, ripple%=0.3, agree=0.63, dc_err%=47.3]
-  SPICE[iter 5]: mse=7.4, agree=0.63, dc_err=47.3%, ripple=0.3%
-buck:   2%|▏         | 5/300 [10:48<11:21:11, 138.55s/it, spice_mse=7.4, best=inf, ripple%=0.3, agree=0.63, dc_err%=47.3]buck:   2%|▏         | 6/300 [13:38<12:11:46, 149.34s/it, spice_mse=7.4, best=inf, ripple%=0.3, agree=0.63, dc_err%=47.3]buck:   2%|▏         | 7/300 [16:56<13:25:57, 165.04s/it, spice_mse=7.4, best=inf, ripple%=0.3, agree=0.63, dc_err%=47.3]/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/resource_tracker.py:396: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown: {'/mp-x7nf2rfk'}
-  warnings.warn(

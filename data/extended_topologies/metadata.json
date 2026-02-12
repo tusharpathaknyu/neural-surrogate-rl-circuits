@@ -1,6 +1,6 @@
 {
   "num_samples_per_topology": 5000,
-  "total_samples": 30000,
+  "total_samples": 35000,
   "waveform_points": 512,
   "topologies": {
     "BUCK": {
@@ -26,6 +26,10 @@
     "FLYBACK": {
       "id": 5,
       "description": "Galvanic isolation, flexible ratios. Vout = Vin \u00d7 N \u00d7 D/(1-D)"
+    },
+    "QR_FLYBACK": {
+      "id": 6,
+      "description": "Soft-switching flyback with ZVS/ZCS, low EMI, high efficiency"
     }
   },
   "param_ranges": {
@@ -203,6 +207,36 @@
       "duty": [
         0.2,
         0.5
+      ]
+    },
+    "QR_FLYBACK": {
+      "L_pri": [
+        0.0001,
+        0.001
+      ],
+      "n_ratio": [
+        0.1,
+        2.0
+      ],
+      "C": [
+        0.0001,
+        0.001
+      ],
+      "R_load": [
+        5,
+        100
+      ],
+      "V_in": [
+        12,
+        400
+      ],
+      "f_sw": [
+        30000.0,
+        120000.0
+      ],
+      "duty": [
+        0.15,
+        0.45
       ]
     }
   }

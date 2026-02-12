@@ -29,18 +29,20 @@ Thumbs.db
 data/*.npy
 data/*.json
 data/buck_dataset.json
+data/extended_topologies/*.npz
+!data/extended_topologies/metadata.json
 
 # Model checkpoints (too large for git)
 checkpoints/*.pt
 checkpoints/*.png
+checkpoints/old_pre_fixes/
 
 # But keep training summary JSONs
 !checkpoints/intensive_training_summary.json
 !checkpoints/training_progress.json
+!checkpoints/multi_topology_history.json
 
 # Temporary files
 *.tmp
 *.temp
-training_resume.log
-training_intensive.log
-training_full.log
+*.log
