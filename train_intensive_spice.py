@@ -828,4 +828,22 @@ if __name__ == '__main__':
     
     signal.signal(signal.SIGINT, signal_handler)
     
+    # Allow training specific topologies via CLI args
+    # Usage: python train_intensive_spice.py buck_boost flyback qr_flyback
+    if len(sys.argv) > 1:
+        requested = sys.argv[1:]
+        valid = [t for t in requested if t in TOPOLOGIES]
+        if valid:
+            TOPOLOGIES_TO_TRAIN = valid
+            print(f"Training only: {', '.join(TOPOLOGIES_TO_TRAIN)}")
+        else:
+            print(f"Unknown topologies: {requested}. Valid: {TOPOLOGIES}")
+            sys.exit(1)
+    else:
+        TOPOLOGIES_TO_TRAIN = TOPOLOGIES
+    
+    # Override the global list for this run
+    original_topologies = TOPOLOGIES
+    TOPOLOGIES = TOPOLOGIES_TO_TRAIN
     main()
+    TOPOLOGIES = original_topologies
