@@ -264,21 +264,6 @@ python -u train_intensive_spice.py     # 3. Train RL agents with SPICE validatio
 - NumPy, SciPy, tqdm, Matplotlib
 - ngspice (circuit simulator, installed and on PATH)
 
-## Demo Visuals
-
-| Visual | Description |
-|--------|------------|
-| `demo_optimization_<topology>.gif` | Animated GIF showing the RL agent converging step-by-step for each topology |
-| `demo_hero_summary.png` | All 7 topologies side-by-side: random initialization vs RL-optimized |
-| `demo_pipeline_diagram.png` | Dual-mode architecture diagram |
-
-Generate all visuals:
-
-```bash
-python generate_linkedin_visuals.py              # all topologies
-python generate_linkedin_visuals.py buck flyback  # specific ones only
-```
-
 ## License
 
-MIT License
+MIT License — see [LICENSE](LICENSE) for details.
