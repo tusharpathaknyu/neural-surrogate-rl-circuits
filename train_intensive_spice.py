@@ -729,8 +729,17 @@ def train_topology_agent(topology: str, surrogate, config: dict) -> dict:
             hours_total = (time.time() - start_time) / 3600
             print(f'\n  [HOURLY SAVE] {topology} @ iter {iteration+1}/{config["n_iterations"]} ({hours_total:.1f}h elapsed) -> {hourly_path}')
     
-    # Final save
-    agent.save(f'checkpoints/rl_agent_{topology}.pt')
+    # Final save — only overwrite best if we actually improved
+    # (Don't blindly overwrite the best-reward checkpoint with the last iteration)
+    recent_rewards_final = agent.episode_rewards[-50:] if agent.episode_rewards else [0]
+    final_mean_reward = np.mean(recent_rewards_final)
+    if final_mean_reward > best_reward:
+        best_reward = final_mean_reward
+        best_mse = np.mean(agent.episode_mses[-50:]) if agent.episode_mses else float('inf')
+        agent.save(f'checkpoints/rl_agent_{topology}.pt')
+    else:
+        # Save final state to a separate file for debugging
+        agent.save(f'checkpoints/rl_agent_{topology}_final.pt')
     
     elapsed = time.time() - start_time
     

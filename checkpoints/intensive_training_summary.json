@@ -1,122 +1,28 @@
 {
-  "timestamp": "2026-02-12T03:03:31.462359",
+  "timestamp": "2026-02-14T00:10:45.845309",
   "device": "cpu",
   "total_steps": 11673600,
-  "total_time_sec": 41283.8422191143,
-  "total_time_str": "11.47 hours",
+  "total_time_sec": 3931.6151900291443,
+  "total_time_str": "1.09 hours",
   "training_results": {
     "buck": {
       "topology": "buck",
-      "best_reward": 99.37348248492957,
-      "best_mse": 1.1567925214767456,
+      "best_reward": 106.69656404537136,
+      "best_mse": 1.3721213340759277,
       "total_steps": 614400,
-      "training_time_sec": 2420.1140308380127,
-      "training_time_str": "40.3 min",
+      "training_time_sec": 3925.7765488624573,
+      "training_time_str": "65.4 min",
       "spice_validations": 60,
-      "spice_calls": 8645
-    },
-    "boost": {
-      "topology": "boost",
-      "best_reward": 3.9928309238719577,
-      "best_mse": 1.2183618545532227,
-      "total_steps": 2048000,
-      "training_time_sec": 6863.048897981644,
-      "training_time_str": "114.4 min",
-      "spice_validations": 100,
-      "spice_calls": 29642
-    },
-    "buck_boost": {
-      "topology": "buck_boost",
-      "best_reward": -207.12446323226968,
-      "best_mse": 144.26783752441406,
-      "total_steps": 819200,
-      "training_time_sec": 1274.8741979599,
-      "training_time_str": "21.2 min",
-      "spice_validations": 80,
-      "spice_calls": 3479
-    },
-    "sepic": {
-      "topology": "sepic",
-      "best_reward": 43.07272937101854,
-      "best_mse": 1.3101962804794312,
-      "total_steps": 2048000,
-      "training_time_sec": 9862.888904809952,
-      "training_time_str": "164.4 min",
-      "spice_validations": 100,
-      "spice_calls": 39981
-    },
-    "cuk": {
-      "topology": "cuk",
-      "best_reward": 176.8370060182284,
-      "best_mse": 1.4829977750778198,
-      "total_steps": 819200,
-      "training_time_sec": 7849.093713998795,
-      "training_time_str": "130.8 min",
-      "spice_validations": 80,
-      "spice_calls": 39261
-    },
-    "flyback": {
-      "topology": "flyback",
-      "best_reward": -89.92454012712797,
-      "best_mse": 5.607800483703613,
-      "total_steps": 2457600,
-      "training_time_sec": 5716.211894035339,
-      "training_time_str": "95.3 min",
-      "spice_validations": 120,
-      "spice_calls": 13688
-    },
-    "qr_flyback": {
-      "topology": "qr_flyback",
-      "best_reward": -77.9999421498806,
-      "best_mse": 8.562813758850098,
-      "total_steps": 2867200,
-      "training_time_sec": 7287.535206079483,
-      "training_time_str": "121.5 min",
-      "spice_validations": 140,
-      "spice_calls": 17157
+      "spice_calls": 13239
     }
   },
   "test_results": {
     "buck": {
       "topology": "buck",
-      "surrogate_mse": 3.068312883377075,
-      "surrogate_std": 1.379698634147644,
-      "spice_mse": 4.21005916595459,
-      "spice_std": 0.0
-    },
-    "boost": {
-      "topology": "boost",
-      "surrogate_mse": 3.7527048587799072,
-      "surrogate_std": 2.8456509113311768
-    },
-    "buck_boost": {
-      "topology": "buck_boost",
-      "surrogate_mse": 594.8783569335938,
-      "surrogate_std": 1538.8062744140625
-    },
-    "sepic": {
-      "topology": "sepic",
-      "surrogate_mse": 3.3474087715148926,
-      "surrogate_std": 1.9370760917663574
-    },
-    "cuk": {
-      "topology": "cuk",
-      "surrogate_mse": 3.4872841835021973,
-      "surrogate_std": 1.1097508668899536,
-      "spice_mse": 4.341290473937988,
-      "spice_std": 0.0
-    },
-    "flyback": {
-      "topology": "flyback",
-      "surrogate_mse": 170.5872344970703,
-      "surrogate_std": 470.6344909667969
-    },
-    "qr_flyback": {
-      "topology": "qr_flyback",
-      "surrogate_mse": 47.12197494506836,
-      "surrogate_std": 83.30371856689453,
-      "spice_mse": 2.216747283935547,
-      "spice_std": 0.0
+      "surrogate_mse": 3.926236152648926,
+      "surrogate_std": 1.316854476928711,
+      "spice_mse": 3.4340858459472656,
+      "spice_std": 1.0114986896514893
     }
   }
 }

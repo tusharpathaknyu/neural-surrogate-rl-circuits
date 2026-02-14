@@ -1,18 +1,18 @@
 {
-  "timestamp": "2026-02-12T17:30:23.847289",
+  "timestamp": "2026-02-14T00:10:40.157778",
   "completed": [
-    "buck_boost"
+    "buck"
   ],
   "results": {
-    "buck_boost": {
-      "topology": "buck_boost",
-      "best_reward": -57.553524512688355,
-      "best_mse": 4.646387697208075,
-      "total_steps": 819200,
-      "training_time_sec": 6158.151179075241,
-      "training_time_str": "102.6 min",
-      "spice_validations": 80,
-      "spice_calls": 16334
+    "buck": {
+      "topology": "buck",
+      "best_reward": 106.69656404537136,
+      "best_mse": 1.3721213340759277,
+      "total_steps": 614400,
+      "training_time_sec": 3925.7765488624573,
+      "training_time_str": "65.4 min",
+      "spice_validations": 60,
+      "spice_calls": 13239
     }
   }
 }
