@@ -1,8 +1,25 @@
 # Neural Surrogate + RL for Power Electronics Circuit Design
 
-An ML system that learns to design DC-DC power converter circuits automatically. Given a desired output voltage waveform, a trained RL agent selects component values (inductor, capacitor, switching frequency, duty cycle, etc.) that produce that waveform -- in seconds instead of hours.
+An ML system that designs DC-DC power converter circuits automatically. You give it a desired output voltage waveform, and a trained RL agent figures out the right component values (inductor, capacitor, switching frequency, duty cycle, etc.) to produce that waveform — in seconds instead of hours of manual tuning.
+
+**All 7 converter topologies achieve SPICE-validated MSE < 5.0 (Excellent quality).**
 
 ---
+
+## Results
+
+Every topology is validated against real ngspice circuit simulation — not just the neural network. These are ground-truth results:
+
+| Topology | SPICE MSE | Quality | Mode |
+|----------|-----------|---------|------|
+| Buck | 3.4 | Excellent | Surrogate |
+| Boost | 3.5 | Excellent | Surrogate |
+| Buck-Boost | 2.8 | Excellent | Formula |
+| SEPIC | 3.9 | Excellent | Surrogate |
+| Cuk | 3.2 | Excellent | Surrogate |
+| Flyback | 0.2 | Excellent | Formula |
+| QR Flyback | 2.8 | Excellent | Formula |
+
 
 ## The Problem
 
@@ -17,11 +34,13 @@ This project automates that entire loop using three components working together:
 Real circuit simulation (ngspice) is accurate but slow -- about 100ms per run. To let an RL agent explore millions of designs, we first train a neural network to approximate the simulator.
 
 - **Input**: 6 circuit parameters + which topology (buck, boost, flyback, etc.)
-- **Output**: The predicted output voltage waveform (512 time-points)
+- **Output**: The predicted output voltage waveform (32 time-points, compressed from ~5000 SPICE points)
 - **Speed**: ~0.001ms per prediction (100,000x faster than SPICE)
 - **Training data**: 5,000+ real ngspice simulations per topology with randomized component values
 
-The surrogate is a shared encoder with topology embeddings and a convolutional waveform decoder (1.16M parameters total). It learns a unified representation across all 7 topologies.
+The surrogate is a shared encoder with topology embeddings and a convolutional waveform decoder (555,619 parameters). It learns a unified representation across all 7 topologies.
+
+> **Why 32 points?** Each SPICE simulation produces ~5000 data points over 5ms of circuit operation. The surrogate compresses this into 32 normalized features that capture the essential waveform shape — DC level, ripple, rise/fall, switching transients.
 
 ### Step 2: Train an RL Agent to Design Circuits
 
@@ -38,15 +57,17 @@ With the fast surrogate in place, we train a reinforcement learning agent that l
 
 ### RL Policy Details
 
-#### State Space (41 dimensions)
+#### State Space (109 dimensions)
 
-The state is a concatenation of three signal groups:
+The state is a concatenation of enriched signal groups with explicit difference features:
 
 | Group | Dims | Content |
 |-------|------|---------|
-| Target waveform features | 32 | 5 statistical (mean, std, min, max, peak-to-peak) + 15 FFT magnitudes + 12 segment means |
-| Normalized parameters | 6 | Current [L, C, R_load, V_in, f_sw, duty] mapped to [0, 1] -- log-scale for L, C, f_sw; linear for the rest |
-| Error signals | 3 | Current MSE, step fraction (t / T_max), previous MSE |
+| Target waveform features | 32 | Compressed waveform from surrogate or formula |
+| Current waveform features | 32 | Agent's current predicted waveform |
+| Pointwise difference | 32 | `target - current` at each of 32 time-points |
+| Normalized parameters | 6 | Current [L, C, R_load, V_in, f_sw, duty] mapped to [0, 1] — log-scale for L, C, f_sw; linear for the rest |
+| Error signals | 7 | Current MSE, previous MSE, MSE improvement, step fraction, best MSE so far, mean absolute error, max absolute error |
 
 #### Action Space (6 continuous dimensions)
 
@@ -60,11 +81,11 @@ Actions are **relative adjustments** (not absolute values). Each is applied with
 #### Network Architecture (ActorCritic)
 
 ```
-State (41-dim)
+State (109-dim)
     |
     v
 [Shared Backbone]
-  Linear(41, H) -> LayerNorm -> ReLU -> Linear(H, H) -> LayerNorm -> ReLU
+  Linear(109, H) -> LayerNorm -> ReLU -> Linear(H, H) -> LayerNorm -> ReLU
     |                                           |
     v                                           v
 [Actor Head]                              [Critic Head]
@@ -117,8 +138,20 @@ The surrogate is fast but imperfect. To prevent the agent from exploiting surrog
 
 - Every 5 training iterations, we run the agent's current design through actual ngspice
 - The reward is blended: 70% real SPICE result + 30% surrogate prediction
-- This keeps the agent honest -- it can't learn shortcuts that only fool the neural network
-- Over a full training run, 500K-600K real SPICE simulations are used alongside millions of surrogate calls
+- This keeps the agent honest — it can't learn shortcuts that only fool the neural network
+- Over a full training run, 268K+ real SPICE simulations are used alongside millions of surrogate calls
+
+### Formula Mode (Dual-Mode Architecture)
+
+The neural surrogate works well for 4 topologies, but for 3 others (buck-boost, flyback, QR flyback) the surrogate's predictions aren't consistent enough for the RL agent to learn from. Instead of forcing more data through the neural network, we bypass it entirely for those topologies using known physics equations:
+
+| Mode | Topologies | Fast Prediction Source |
+|------|-----------|----------------------|
+| **Surrogate** | Buck, Boost, SEPIC, Cuk | Neural network (32-point waveform) |
+| **Formula** | Buck-Boost, Flyback, QR Flyback | Analytical $V_{out} = f(V_{in}, D, \eta)$ (512-point waveform) |
+
+Both modes still validate against real SPICE simulation — the only difference is what provides the fast prediction between SPICE calls. Formula mode uses the known DC transfer function (e.g., $V_{out} = -V_{in} \cdot D / (1-D) \cdot \eta$ for buck-boost) with an efficiency factor $\eta \sim 0.85$ and synthesized ripple.
+
 
 ### The Reward Function
 
@@ -171,30 +204,31 @@ D = duty cycle (fraction of time the switch is ON). n = transformer turns ratio.
 
 Each topology trains for hundreds of iterations. Each iteration, the agent collects thousands of environment steps using the fast surrogate, then validates against real ngspice.
 
-| Topology | Iterations | Env Steps/Iter | SPICE Calls | Wall Time |
-|----------|-----------|----------------|-------------|-----------|
-| Buck | 300 | 1,024 | ~30K | ~4 hrs |
-| Boost | 400 | 2,048 | ~80K | ~12 hrs |
-| Buck-Boost | 350 | 1,024 | ~35K | ~6 hrs |
-| SEPIC | 400 | 2,048 | ~80K | ~12 hrs |
-| Cuk | 350 | 1,024 | ~35K | ~6 hrs |
-| Flyback | 600 | 2,048 | ~493K | ~80 hrs |
-| QR Flyback | 700 | 4,096 | ~576K+ | ~70+ hrs |
+| Topology | Iterations | Steps/Iter | SPICE Freq | Wall Time |
+|----------|-----------|------------|------------|----------|
+| Buck | 300 | 1,024 | 20% episodes | ~4 hrs |
+| Boost | 400 | 2,048 | 20% episodes | ~4 hrs |
+| Buck-Boost | 350 | 1,024 | 50% episodes | ~3 hrs |
+| SEPIC | 400 | 2,048 | 20% episodes | ~4 hrs |
+| Cuk | 350 | 1,024 | 20% episodes | ~3 hrs |
+| Flyback | 600 | 2,048 | 50% episodes | ~6 hrs |
+| QR Flyback | 700 | 4,096 | 50% episodes | ~6 hrs |
 
-**Total: 200+ hours of training, 1M+ real SPICE simulations across all topologies.** All training ran on a MacBook Air (M3, CPU-only). SPICE simulation is CPU-bound and dominates the wall time.
+**Total: ~29.5 hours of training, 268K+ real SPICE simulations across all topologies.** All training ran on a MacBook Air (M3, 8GB, CPU-only). Formula mode topologies use 50% SPICE episode rate for more ground-truth feedback.
 
 ## Project Structure
 
 ```
 MLEntry/
-|-- train_intensive_spice.py           Main training script (SPICE-in-the-loop)
+|-- train_intensive_spice.py           Main training script (dual-mode, SPICE-in-the-loop)
+|-- generate_linkedin_visuals.py       Demo visualization generator
 |-- models/
-|   |-- multi_topology_surrogate.py    Surrogate model (1.16M params)
+|   |-- multi_topology_surrogate.py    Surrogate model (555K params)
 |   +-- forward_surrogate.py           Base surrogate class
 |-- rl/
-|   |-- environment.py                 RL environment (state, action, step logic)
+|   |-- environment.py                 RL environment (109-dim state, 6-dim action)
 |   |-- ppo_agent.py                   PPO agent (ActorCritic, pure PyTorch)
-|   |-- spice_reward.py                ngspice subprocess integration
+|   |-- spice_reward.py                ngspice subprocess integration + SPICE netlists
 |   +-- topology_rewards.py            Per-topology reward shaping
 |-- checkpoints/
 |   |-- multi_topology_surrogate.pt    Pre-trained surrogate (required)
@@ -229,6 +263,21 @@ python -u train_intensive_spice.py     # 3. Train RL agents with SPICE validatio
 - PyTorch 2.0+
 - NumPy, SciPy, tqdm, Matplotlib
 - ngspice (circuit simulator, installed and on PATH)
+
+## Demo Visuals
+
+| Visual | Description |
+|--------|------------|
+| `demo_optimization_<topology>.gif` | Animated GIF showing the RL agent converging step-by-step for each topology |
+| `demo_hero_summary.png` | All 7 topologies side-by-side: random initialization vs RL-optimized |
+| `demo_pipeline_diagram.png` | Dual-mode architecture diagram |
+
+Generate all visuals:
+
+```bash
+python generate_linkedin_visuals.py              # all topologies
+python generate_linkedin_visuals.py buck flyback  # specific ones only
+```
 
 ## License
 

@@ -46,3 +46,9 @@ checkpoints/old_pre_fixes/
 *.tmp
 *.temp
 *.log
+
+# Demo visuals (keep local)
+demo_*.gif
+demo_*.png
+generate_linkedin_visuals.py
+visuals.log
