@@ -47,8 +47,13 @@ checkpoints/old_pre_fixes/
 *.temp
 *.log
 
-# Demo visuals (keep local)
-demo_*.gif
+# Demo visuals (keep local, except hero GIF for README)
 demo_*.png
+demo_optimization_boost.gif
+demo_optimization_buck_boost.gif
+demo_optimization_cuk.gif
+demo_optimization_flyback.gif
+demo_optimization_qr_flyback.gif
+demo_optimization_sepic.gif
 generate_linkedin_visuals.py
 visuals.log

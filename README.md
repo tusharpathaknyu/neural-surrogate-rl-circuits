@@ -4,6 +4,10 @@ An ML system that designs DC-DC power converter circuits automatically. You give
 
 **All 7 converter topologies achieve SPICE-validated MSE < 5.0 (Excellent quality).**
 
+![RL agent converging on target waveform](demo_optimization_buck.gif)
+
+*The white line is the target voltage waveform (from real circuit simulation). The colored line is the RL agent's prediction — watch it converge in real time as the agent adjusts circuit parameters step by step. The right panel shows the waveform error (MSE) dropping toward zero.*
+
 ---
 
 ## Results
